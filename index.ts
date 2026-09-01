@@ -10,7 +10,10 @@
  *   3. A hard gate blocks any non-keep-list tool call with guidance to delegate.
  *
  * Child mode (PI_ORCHESTRATOR_CHILD=1): the extension self-disables and only
- * installs the orphan watchdog (parent PID disappears → exit).
+ * installs the orphan watchdog, plus the ADR-0007 tool gate when the parent
+ * set PI_ORCHESTRATOR_BLOCKED_TOOLS (gate-only child mode).
+ */
+
  */
 
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
@@ -21,17 +24,58 @@ import {
 	effectiveKeepTools,
 	matchersForTool,
 	toolIsKept,
+	toolMatchesAnyMatcher,
 	loadConfig,
 	saveConfig,
 	type DiscoveredTool,
 	type OrchestratorConfig,
 } from "./config.ts";
-import { clearFleetWidget, hasRunningTasks, idleFleetWidgetLines, killAllFleet, registerDelegateTool } from "./delegate.ts";
+import { clearFleetWidget, hasRunningTasks, idleFleetWidgetLines, killAllFleet, registerDelegateTool, type DelegateDeps } from "./delegate.ts";
 import { buildPolicy } from "./policy.ts";
 import { truncateToWidth } from "./width.ts";
 import type { AgentConfig } from "./agents.ts";
 
-// ── Child mode: orphan watchdog, nothing else ───────────────────────────────
+// ── Child mode: orphan watchdog + ADR-0007 tool gate ───────────────────────────────
+
+/**
+ * Parse PI_ORCHESTRATOR_BLOCKED_TOOLS into a matcher list. Comma-separated,
+ * same matcher syntax as keepTools (exact name, glob, ext:<id>); segments
+ * are trimmed and empty ones dropped. Exact strings are preserved (matching
+ * is case-insensitive downstream); dedupe is not required.
+ */
+export function parseBlockedToolsEnv(value: string): string[] {
+	return value
+		.split(",")
+		.map((m) => m.trim())
+		.filter((m) => m.length > 0);
+}
+
+/**
+ * Child-side tool gate (ADR-0007): block tools matching
+ * PI_ORCHESTRATOR_BLOCKED_TOOLS with a visible reason, so a subagent that
+ * inherits global extensions still honors the orchestrator's tool policy.
+ * Backstop complement to the parent-side --exclude-tools expansion (ADR-0008):
+ * also enforces matchers whose tools the parent's registry could not see,
+ * with a visible reason.
+ * Fail-soft: with an absent/empty env var no handler is installed at all.
+ */
+export function installChildToolGate(pi: any): void {
+	const matchers = parseBlockedToolsEnv(process.env.PI_ORCHESTRATOR_BLOCKED_TOOLS ?? "");
+	if (matchers.length === 0) return;
+
+	pi.on("tool_call", async (event: any) => {
+		if (event.toolName === "delegate") return;
+		const tool = pi.getAllTools().find((t: any) => t.name === event.toolName);
+		const matched = toolMatchesAnyMatcher({ name: event.toolName, sourceInfo: tool?.sourceInfo }, matchers);
+		if (!matched) return;
+		return {
+			block: true,
+			reason:
+				`Blocked by orchestrator policy: tool "${event.toolName}" matches blocked matcher "${matched}". ` +
+				`It will not execute. Use the remaining tools to complete the task.`,
+		};
+	});
+}
 
 function installChildWatchdog(): void {
 	const parentPid = process.ppid;
@@ -61,9 +105,36 @@ function installChildWatchdog(): void {
 
 // ── Parent mode ─────────────────────────────────────────────────────────────
 
+/**
+ * Deps for the delegate tool. Takes a live config getter (session_start
+ * reassigns `config` from disk) so every dep reads the current values, never
+ * a stale copy. Exported for unit tests (tests/index.test.ts).
+ */
+export function buildDelegateDeps(getConfig: () => OrchestratorConfig, onIdle: () => void): DelegateDeps {
+	return {
+		getAgents: () => discoverAgents(getConfig()),
+		getDispatchDefaults: (ctx: any) => ({
+			model: ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+			thinkingLevel: ctx?.thinkingLevel,
+		}),
+		getCwd: () => process.cwd(),
+		getSignal: () => undefined,
+		getMaxTurns: () => getConfig().maxTurns,
+		getStallTimeoutMs: () => getConfig().stallTimeoutMs,
+		// Global child-side block list (ADR-0007); unioned with per-agent
+		// blockTools inside delegate.ts resolveBlockedTools.
+		getChildBlockedTools: () => getConfig().childBlockedTools,
+		// Child extension loading (ADR-0008): empty = inherit-all, non-empty =
+		// --no-extensions + one -e per entry (derived inside delegate.ts).
+		getChildExtensions: () => getConfig().childExtensions,
+		onIdle,
+	};
+}
+
 export default function (pi: any) {
 	if (process.env.PI_ORCHESTRATOR_CHILD === "1") {
 		installChildWatchdog();
+		installChildToolGate(pi);
 		return;
 	}
 
@@ -206,18 +277,7 @@ export default function (pi: any) {
 
 	// ── The delegate tool ───────────────────────────────────────────────────
 
-	registerDelegateTool(pi, {
-		getAgents: () => discoverAgents(config),
-		getDispatchDefaults: (ctx: any) => ({
-			model: ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-			thinkingLevel: ctx?.thinkingLevel,
-		}),
-		getCwd: () => process.cwd(),
-		getSignal: () => undefined,
-		getMaxTurns: () => config.maxTurns,
-		getStallTimeoutMs: () => config.stallTimeoutMs,
-		onIdle: () => updateIdleWidget(),
-	});
+	registerDelegateTool(pi, buildDelegateDeps(() => config, () => updateIdleWidget()));
 
 	// ── Commands ────────────────────────────────────────────────────────────
 

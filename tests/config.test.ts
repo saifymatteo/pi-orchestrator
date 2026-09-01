@@ -12,7 +12,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { discoverKeptTools, effectiveKeepTools, loadConfig, toolIsKept } from "../config.ts";
+import {
+	discoverKeptTools,
+	effectiveKeepTools,
+	loadConfig,
+	toolIsKept,
+	toolMatchesAnyMatcher,
+} from "../config.ts";
 
 // ── loadConfig / maxTurns validation ────────────────────────────────────────
 
@@ -67,6 +73,8 @@ test("loadConfig: missing file yields full defaults", () => {
 		assert.deepEqual(config, {
 			enabled: true,
 			keepTools: ["delegate"],
+			childBlockedTools: [],
+			childExtensions: [],
 			builtinFleet: true,
 			autoKeepExtensions: false,
 			modelOverrides: {},
@@ -92,6 +100,68 @@ test("loadConfig: keepTools drops non-string/blank entries", () => {
 		assert.deepEqual(loadConfig().keepTools, ["todo", "hindsight_*"]);
 	});
 });
+test("loadConfig: childBlockedTools keeps valid matchers and drops non-string/blank entries", () => {
+	withConfigFile({ childBlockedTools: ["bash", "hindsight_*", "", 42, "  ", "ext:@l/p"] }, () => {
+		assert.deepEqual(loadConfig().childBlockedTools, ["bash", "hindsight_*", "ext:@l/p"]);
+	});
+});
+
+test("loadConfig: childBlockedTools missing or non-array falls back to []", () => {
+	withConfigFile(null, () => {
+		assert.deepEqual(loadConfig().childBlockedTools, []);
+	});
+	withConfigFile({ childBlockedTools: "bash" }, () => {
+		assert.deepEqual(loadConfig().childBlockedTools, []);
+	});
+});
+
+// ── ADR-0008 child spawn policy fields ─────────────────────────────────────
+
+test("loadConfig: childExtensions keeps valid strings and drops non-string/blank entries", () => {
+	withConfigFile({ childExtensions: ["./my-ext.ts", "", 42, "  ", "npm:@foo/bar"] }, () => {
+		assert.deepEqual(loadConfig().childExtensions, ["./my-ext.ts", "npm:@foo/bar"]);
+	});
+});
+
+test("loadConfig: childExtensions missing or non-array falls back to []", () => {
+	withConfigFile(null, () => {
+		assert.deepEqual(loadConfig().childExtensions, []);
+	});
+	withConfigFile({ childExtensions: "./my-ext.ts" }, () => {
+		assert.deepEqual(loadConfig().childExtensions, []);
+	});
+});
+
+// ── toolMatchesAnyMatcher ───────────────────────────────────────────────────
+
+test("toolMatchesAnyMatcher: exact matcher (case-insensitive)", () => {
+	const t = tool("todo", nm("some-pkg", "i.js"));
+	assert.equal(toolMatchesAnyMatcher(t, ["todo"]), "todo");
+	assert.equal(toolMatchesAnyMatcher(t, ["TODO"]), "TODO");
+	assert.equal(toolMatchesAnyMatcher(t, ["todo2"]), undefined);
+	assert.equal(toolMatchesAnyMatcher(t, []), undefined);
+});
+
+test("toolMatchesAnyMatcher: glob matcher on tool name", () => {
+	const t = tool("hindsight_recall", nm("@l/pi-hindsight", "i.js"));
+	assert.equal(toolMatchesAnyMatcher(t, ["hindsight_*"]), "hindsight_*");
+	assert.equal(toolMatchesAnyMatcher(t, ["hindsight_?ecall"]), "hindsight_?ecall");
+	assert.equal(toolMatchesAnyMatcher(t, ["hindsight_*_retain"]), undefined);
+});
+
+test("toolMatchesAnyMatcher: ext:<id> matcher matches whole owning package", () => {
+	const t = tool("hindsight_recall", nm("@l/pi-hindsight", "i.js"));
+	assert.equal(toolMatchesAnyMatcher(t, ["ext:@l/pi-hindsight"]), "ext:@l/pi-hindsight");
+	assert.equal(toolMatchesAnyMatcher(t, ["ext:@l/pi-hindsight2"]), undefined);
+	assert.equal(toolMatchesAnyMatcher(t, ["ext:pi-hindsight"]), undefined);
+});
+
+test("toolMatchesAnyMatcher: returns the first matching matcher", () => {
+	const t = tool("hindsight_recall", nm("@l/pi-hindsight", "i.js"));
+	assert.equal(toolMatchesAnyMatcher(t, ["nope", "hindsight_*", "ext:@l/pi-hindsight"]), "hindsight_*");
+	assert.equal(toolMatchesAnyMatcher(t, ["nope", "HINDSIGHT_RECALL", "hindsight_*"]), "HINDSIGHT_RECALL");
+});
+
 
 // ── discoverKeptTools ───────────────────────────────────────────────────────
 

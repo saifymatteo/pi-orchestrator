@@ -90,20 +90,36 @@ test("discoverAgents: maxTurns accepts 7 and rejects 'seven', 0, 1.5 (no coercio
 	fs.rmSync(user, { recursive: true, force: true });
 });
 
+test("discoverAgents: blockTools parses arrays and comma strings, absent means undefined", () => {
+	const user = tempRoot("blocks");
+	const agentsDir = path.join(user, "agents");
+	writeAgent(agentsDir, "a.md", { name: "a", description: "array", blockTools: ["bash", "grep"] });
+	writeAgent(agentsDir, "b.md", { name: "b", description: "comma string", blockTools: "bash, grep" });
+	writeAgent(agentsDir, "c.md", { name: "c", description: "absent" });
+
+	const byName = new Map(withUserDir(user, () => discoverAgents(baseConfig, user)).map((a) => [a.name, a]));
+	assert.deepEqual(byName.get("a").blockTools, ["bash", "grep"]);
+	assert.deepEqual(byName.get("b").blockTools, ["bash", "grep"]);
+	assert.equal(byName.get("c").blockTools, undefined);
+	fs.rmSync(user, { recursive: true, force: true });
+});
+
 test("discoverAgents: project beats user, and .pi/agents beats .agents/agents at the same level", () => {
 	const user = tempRoot("user");
 	const project = tempRoot("proj");
 	fs.writeFileSync(path.join(project, ".git"), "", "utf-8");
 
-	writeAgent(path.join(user, "agents"), "dup.md", { name: "dup", description: "user version" });
-	writeAgent(path.join(project, ".agents", "agents"), "dup.md", { name: "dup", description: "project .agents" });
-	writeAgent(path.join(project, ".pi", "agents"), "dup.md", { name: "dup", description: "project .pi" });
+	writeAgent(path.join(user, "agents"), "dup.md", { name: "dup", description: "user version", blockTools: "bash" });
+	writeAgent(path.join(project, ".agents", "agents"), "dup.md", { name: "dup", description: "project .agents", blockTools: "bash,grep" });
+	writeAgent(path.join(project, ".pi", "agents"), "dup.md", { name: "dup", description: "project .pi", blockTools: ["grep"] });
 	writeAgent(path.join(user, "agents"), "only-user.md", { name: "only-user", description: "user only" });
 
 	const agents = withUserDir(user, () => discoverAgents(baseConfig, project));
 	const dup = agents.find((a) => a.name === "dup");
 	assert.equal(dup.source, "project");
 	assert.equal(dup.description, "project .pi"); // .pi/agents wins over .agents/agents
+	// Merge precedence applies to blockTools too: the project copy replaces the user copy wholesale.
+	assert.deepEqual(dup.blockTools, ["grep"]);
 	assert.ok(agents.some((a) => a.name === "only-user" && a.source === "user"));
 
 	fs.rmSync(user, { recursive: true, force: true });

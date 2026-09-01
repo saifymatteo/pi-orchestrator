@@ -48,6 +48,6 @@
     "@earendil-works/pi-tui": ">=0.84.0"
   },
   "scripts": {
-    "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts"
+    "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts tests/index.test.ts"
   }
 }

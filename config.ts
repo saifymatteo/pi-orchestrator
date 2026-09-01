@@ -28,6 +28,16 @@ export interface OrchestratorConfig {
 	enabled: boolean;
 	/** Matchers for tools the orchestrator keeps while engaged. */
 	keepTools: string[];
+	/** Tool matchers blocked in every subagent (exact, glob, ext:<id>); always
+	 *  enforced two ways (ADR-0008): expanded parent-side to concrete tool names
+	 *  and unregistered via `--exclude-tools`, plus child-side via tool_call
+	 *  block (backstop for tools the parent's registry could not see). */
+	childBlockedTools: string[];
+	/** Extension sources (path, npm, or git — pi's repeatable `-e` flag) loaded
+	 *  in every child (ADR-0008). Derived semantics: non-empty spawns children
+	 *  with `--no-extensions` plus one `-e` per entry (selective loading);
+	 *  empty lets children inherit every discovered extension (ADR-0005). */
+	childExtensions: string[];
 	/** Include the fleet shipped with the extension (user agents always win by name). */
 	builtinFleet: boolean;
 	/** Per-agent model overrides, e.g. { "scout": "openrouter/some-cheap-model" }. */
@@ -49,6 +59,8 @@ export interface OrchestratorConfig {
 export const DEFAULT_CONFIG: OrchestratorConfig = {
 	enabled: true,
 	keepTools: ["delegate"],
+	childBlockedTools: [],
+	childExtensions: [],
 	builtinFleet: true,
 	autoKeepExtensions: false,
 	modelOverrides: {},
@@ -69,6 +81,12 @@ export function loadConfig(): OrchestratorConfig {
 			keepTools: Array.isArray(raw.keepTools)
 				? raw.keepTools.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
 				: DEFAULT_CONFIG.keepTools,
+			childBlockedTools: Array.isArray(raw.childBlockedTools)
+				? raw.childBlockedTools.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
+				: DEFAULT_CONFIG.childBlockedTools,
+			childExtensions: Array.isArray(raw.childExtensions)
+				? raw.childExtensions.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
+				: DEFAULT_CONFIG.childExtensions,
 			builtinFleet: typeof raw.builtinFleet === "boolean" ? raw.builtinFleet : DEFAULT_CONFIG.builtinFleet,
 			autoKeepExtensions:
 				typeof raw.autoKeepExtensions === "boolean" ? raw.autoKeepExtensions : DEFAULT_CONFIG.autoKeepExtensions,
@@ -85,6 +103,8 @@ export function loadConfig(): OrchestratorConfig {
 		return {
 			...DEFAULT_CONFIG,
 			keepTools: [...DEFAULT_CONFIG.keepTools],
+			childBlockedTools: [...DEFAULT_CONFIG.childBlockedTools],
+			childExtensions: [...DEFAULT_CONFIG.childExtensions],
 			modelOverrides: {},
 			maxTurns: DEFAULT_CONFIG.maxTurns,
 		};
@@ -169,6 +189,19 @@ function matcherMatches(matcher: string, toolName: string, extensionId: string):
 	if (m.includes("*") || m.includes("?")) return globToRegex(m).test(toolName);
 	return toolName.toLowerCase() === m;
 }
+/**
+ * First matcher that matches the tool (exact, glob, ext:<id>), or undefined.
+ * Thin wrapper over matcherMatches/deriveExtensionId — same semantics as
+ * toolIsKept, but returns the responsible matcher instead of a boolean.
+ */
+export function toolMatchesAnyMatcher(
+	tool: { name: string; sourceInfo?: unknown },
+	matchers: string[],
+): string | undefined {
+	const extensionId = deriveExtensionId(tool as { name: string; sourceInfo?: { path?: string; source?: string } });
+	return matchers.find((matcher) => matcherMatches(matcher, tool.name, extensionId));
+}
+
 
 /**
  * True when a tool stays available to the orchestrator.

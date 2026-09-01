@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 
 import { idleFleetWidgetLines, renderFleetLines } from "../delegate.ts";
 import { collectTouchedFiles, fleetKey, formatTouchedFiles, nextFleetRunId } from "../delegate.ts";
+import { buildChildSpawnArgs, expandBlockedToolsToNames } from "../delegate.ts";
 
 /** Minimal RunningTask-shaped fixture (mode is the only new required field). */
 function task(overrides = {}) {
@@ -285,3 +286,116 @@ test("formatTouchedFiles: empty input returns empty string", () => {
 	assert.equal(formatTouchedFiles([]), "");
 });
 
+// ── Child spawn args (ADR-0008) ─────────────────────────────────────────────
+
+test("buildChildSpawnArgs: base RPC args are always present, in order", () => {
+	assert.deepEqual(buildChildSpawnArgs({ extensions: [], excludeTools: [] }), [
+		"--mode",
+		"rpc",
+		"--no-session",
+	]);
+});
+
+test("buildChildSpawnArgs: model, thinking, and per-agent tools join the front", () => {
+	assert.deepEqual(
+		buildChildSpawnArgs({
+			model: "openrouter/cheap",
+			thinkingLevel: "high",
+			tools: ["read", "grep"],
+			extensions: [],
+			excludeTools: [],
+		}),
+		["--mode", "rpc", "--no-session", "--model", "openrouter/cheap", "--thinking", "high", "--tools", "read,grep"],
+	);
+});
+
+test("buildChildSpawnArgs: no model/thinking/tools omits their flags entirely", () => {
+	const args = buildChildSpawnArgs({ extensions: [], excludeTools: [] });
+	assert.ok(!args.includes("--model"));
+	assert.ok(!args.includes("--thinking"));
+	assert.ok(!args.includes("--tools"));
+});
+
+test("buildChildSpawnArgs: empty extensions ⇒ no extension flags (children inherit-all)", () => {
+	const args = buildChildSpawnArgs({ extensions: [], excludeTools: [] });
+	assert.ok(!args.includes("--no-extensions"));
+	assert.ok(!args.includes("-e"));
+});
+
+test("buildChildSpawnArgs: non-empty extensions ⇒ --no-extensions plus one -e pair per entry", () => {
+	const args = buildChildSpawnArgs({
+		extensions: ["./my-ext.ts", "npm:@foo/bar"],
+		excludeTools: [],
+	});
+	assert.deepEqual(args.slice(args.indexOf("--no-extensions")), [
+		"--no-extensions",
+		"-e",
+		"./my-ext.ts",
+		"-e",
+		"npm:@foo/bar",
+	]);
+});
+
+test("buildChildSpawnArgs: excludeTools becomes one comma-joined --exclude-tools flag (pi docs: comma-separated denylist)", () => {
+	const args = buildChildSpawnArgs({ extensions: [], excludeTools: ["advisor", "history_cleanup"] });
+	assert.deepEqual(args.slice(-2), ["--exclude-tools", "advisor,history_cleanup"]);
+	assert.equal(args.filter((a) => a === "--exclude-tools").length, 1, "flag must not repeat");
+
+	// Empty list → flag omitted entirely (the interception gate handles it).
+	assert.ok(!buildChildSpawnArgs({ extensions: [], excludeTools: [] }).includes("--exclude-tools"));
+});
+
+// ── expandBlockedToolsToNames (ADR-0008) ──────────────────────────────────
+
+const tool = (name: string, sourceInfo?: unknown) => ({ name, sourceInfo });
+const nm = (pkg: string, rest: string) => ({ path: `C:/repo/node_modules/${pkg}/${rest}` });
+
+test("expandBlockedToolsToNames: exact match (case-insensitive) resolves to the tool name", () => {
+	const tools = [tool("advisor", nm("@l/advisor", "i.js")), tool("todo", undefined)];
+	assert.deepEqual(expandBlockedToolsToNames(["advisor"], tools), ["advisor"]);
+	assert.deepEqual(expandBlockedToolsToNames(["ADVISOR"], tools), ["advisor"]);
+});
+
+test("expandBlockedToolsToNames: glob matcher expands to every matching tool name", () => {
+	const tools = [
+		tool("hindsight_recall", nm("@luxusai/pi-hindsight", "i.js")),
+		tool("hindsight_retain", nm("@luxusai/pi-hindsight", "i.js")),
+		tool("todo", undefined),
+	];
+	assert.deepEqual(expandBlockedToolsToNames(["hindsight_*"], tools), ["hindsight_recall", "hindsight_retain"]);
+});
+
+test("expandBlockedToolsToNames: ext:<id> matcher resolves via sourceInfo", () => {
+	const tools = [
+		tool("hindsight_recall", nm("@luxusai/pi-hindsight", "i.js")),
+		tool("other_tool", nm("plain-pkg", "i.js")),
+	];
+	assert.deepEqual(expandBlockedToolsToNames(["ext:@luxusai/pi-hindsight"], tools), ["hindsight_recall"]);
+});
+
+test("expandBlockedToolsToNames: dedupes names across overlapping matchers, first-seen order", () => {
+	const tools = [
+		tool("hindsight_recall", nm("@luxusai/pi-hindsight", "i.js")),
+		tool("hindsight_retain", nm("@luxusai/pi-hindsight", "i.js")),
+	];
+	// recall matches both the glob and the ext: matcher — collected once.
+	assert.deepEqual(expandBlockedToolsToNames(["hindsight_*", "ext:@luxusai/pi-hindsight"], tools), [
+		"hindsight_recall",
+		"hindsight_retain",
+	]);
+});
+
+test("expandBlockedToolsToNames: duplicate tool entries do not duplicate names", () => {
+	const tools = [tool("advisor", nm("x", "i.js")), tool("advisor", nm("x", "i.js"))];
+	assert.deepEqual(expandBlockedToolsToNames(["advisor"], tools), ["advisor"]);
+});
+
+test("expandBlockedToolsToNames: matchers that expand to nothing are skipped silently", () => {
+	const tools = [tool("todo", undefined)];
+	assert.deepEqual(expandBlockedToolsToNames(["nope", "missing_*", "ext:@gone/pkg"], tools), []);
+});
+
+test("expandBlockedToolsToNames: empty matchers ⇒ []", () => {
+	const tools = [tool("advisor", nm("x", "i.js")), tool("todo", undefined)];
+	assert.deepEqual(expandBlockedToolsToNames([], tools), []);
+});

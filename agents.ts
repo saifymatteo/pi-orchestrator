@@ -24,6 +24,8 @@ export interface AgentConfig {
 	name: string;
 	description: string;
 	tools?: string[];
+	/** Tool matchers blocked for this agent (exact, glob, ext:<id>), from blockTools frontmatter. */
+	blockTools?: string[];
 	model?: string;
 	/** Per-agent turn budget override (ADR-0006); positive integer or undefined. */
 	maxTurns?: number;
@@ -37,6 +39,7 @@ interface AgentFrontmatter {
 	name?: unknown;
 	description?: unknown;
 	tools?: unknown;
+	blockTools?: unknown;
 	model?: unknown;
 	maxTurns?: unknown;
 	hidden?: unknown;
@@ -82,6 +85,7 @@ function loadAgentsFromDir(dir: string, source: AgentConfig["source"]): AgentCon
 			name: frontmatter.name,
 			description: frontmatter.description,
 			tools: parseToolList(frontmatter.tools),
+			blockTools: parseToolList(frontmatter.blockTools),
 			model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
 			// Strict positive integer: strings and other types are rejected, no coercion.
 			maxTurns:

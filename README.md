@@ -27,6 +27,7 @@ pi install git:github.com/saifymatteo/pi-orchestrator
 | Turn budget | soft-grace steer at the budget, hard kill at budget + 5 turns (ADR-0006) |
 | Stall watchdog | hard-kills a child silent for `stallTimeoutMs` (default 10 min); any output resets it (ADR-0006) |
 | Child mode | children self-disable this extension; a parent-PID heartbeat watchdog exits them if pi dies |
+| Child tool gate | children block tools matching `childBlockedTools` / per-agent `blockTools` two ways: expanded to concrete names and unregistered at spawn via `--exclude-tools`, plus a `tool_call` gate backstop with a visible reason (ADR-0007/0008) |
 | UI | grouped fleet widget above the editor — `⏳ Fleet · <mode> · N running` header with one indented line per subagent (agent, turn, ctx load, tokens, task summary); idle line when nothing runs |
 
 Child success is state-based (the RPC `agent_settled` event); child exit codes are informational only, since settled children are SIGTERMed by design.
@@ -39,6 +40,8 @@ Child success is state-based (the RPC `agent_settled` event); child exit codes a
 {
   "enabled": true,
   "keepTools": ["delegate"],
+  "childBlockedTools": [],
+  "childExtensions": [],
   "builtinFleet": true,
   "autoKeepExtensions": false,
   "modelOverrides": {},
@@ -68,6 +71,30 @@ By default the effective keep-list is exactly your config matchers plus `delegat
 ### `autoKeepExtensions` (boolean, default `false`)
 
 Opt back into the original ADR-0004 auto-keep behavior: every discovered non-builtin extension contributes an `ext:<id>` matcher to the effective keep-list each turn, so its tools stay available without config entries. Builtin-shadowing extensions stay excluded unless explicitly listed as `ext:<id>` (see above). With the default `false`, nothing is auto-kept — the keep-list alone decides (ADR-0004).
+
+### `childBlockedTools` (string[], default `[]`)
+
+Tool matchers blocked in **every subagent** (ADR-0007), enforced child-side. Matcher semantics are the same as `keepTools` (all case-insensitive):
+
+- **Exact tool name** — `"advisor"` matches the `advisor` tool.
+- **Glob on tool name** — `"hindsight_*"`; `*` matches any run of characters, `?` a single one.
+- **Extension id** — `"ext:@luxusai/pi-hindsight"` matches every tool registered by that package.
+
+Empty or absent means nothing is blocked — children run unrestricted. Semantics:
+
+- **Additive union with per-agent `blockTools`**: the effective child block list is the global config matchers plus the agent's frontmatter matchers. Global config is a policy floor — a per-agent definition can add blocks but can never re-grant a globally blocked tool.
+- **Always enforced twice (ADR-0008)**: the matchers are expanded parent-side to concrete tool names (glob and `ext:` matchers are resolved against the parent's tool registry at spawn time; matchers that expand to nothing are skipped silently) and the names are unregistered at spawn via pi's `--exclude-tools` comma list, so the child never even sees them — requires pi >= 0.84.0, which package.json already enforces. On top of that, a child-side interception gate blocks any matching tool call with a visible reason (`Blocked by orchestrator policy: ...`), so the subagent can adapt instead of failing opaquely. The gate is the backstop for tools the parent's registry could not see (e.g. a child loaded via a per-task `cwd` with extra project extensions) — blocked tools there stay *visible* but never execute.
+- **System-prompt hint**: when tools are blocked, the agent's system prompt gets a `# Tool policy` section listing the blocked matchers.
+- **Requires the extension in the child**: the backstop gate and the system-prompt hint run inside the child process, so pi-orchestrator must load there too. Children inherit installed packages automatically (ADR-0005); a user-level `~/.pi/agent` install is recommended so the gate is always present. If the extension does not load in the child, enforcement is fail-soft: the spawn-time `--exclude-tools` unregistration still applies, but nothing blocks anything else.
+
+### `childExtensions` (string[], default `[]`)
+
+Extension sources loaded in every child, with derived semantics (ADR-0008):
+
+- **Empty (default)** — children inherit all discovered extensions, exactly as pi's own discovery provides (ADR-0005).
+- **Non-empty** — children spawn with pi's `--no-extensions` flag (no global extensions load at all) and load only these entries via pi's repeatable `-e`/`--extension` flag (a path, npm, or git source).
+
+Note: to keep the child-side tool gate and orphan watchdog alive in isolated children, add this package's entry via `childExtensions` (e.g. `["npm:@saifymatteo/pi-orchestrator"]`) — otherwise nothing loads child-side, this extension included. See [Child extension control](#child-extension-control) for the motivating case.
 
 ### `builtinFleet` (boolean, default `true`)
 
@@ -101,6 +128,7 @@ Every agent is a markdown file: YAML frontmatter plus a body that becomes the ag
 | `name` | string (required) | The name the orchestrator passes to `delegate` |
 | `description` | string (required) | Shown to the orchestrator in the delegation policy so it can pick the right agent |
 | `tools` | YAML list or comma-separated string | Restricts the child's toolset (e.g. `read, grep, find, ls`); omit for the full toolset |
+| `blockTools` | YAML list or comma-separated string | Tool matchers blocked for this agent (exact, glob, `ext:<id>`); **additive** with the global `childBlockedTools` floor — it can extend but never re-grant (ADR-0007) |
 | `model` | string | `provider/model` for this agent; falls back to the dispatching session's model |
 | `hidden` | boolean | `true` excludes the agent from discovery |
 | `maxTurns` | positive integer | Per-agent turn budget; overrides the config `maxTurns` |
@@ -127,6 +155,10 @@ Agent directories, merged by name:
 - **Project** — `.pi/agents/` and `.agents/agents/` at every directory level, walking from the current directory up through the ancestor containing `.git` (or to the filesystem root)
 
 Precedence on name collision: **project > user > builtin**. Within the project tree, nearer directories win, and at the same level `.pi/agents` beats `.agents/agents`. A shadowed agent is replaced entirely — there is one winning definition per name.
+
+## Child extension control
+
+Children inherit every globally installed extension (ADR-0005), and pi offers no way to suppress extensions at handler level — only spawn-time flags (`--no-extensions` plus selective `-e`). That matters because some extensions misbehave in short-lived RPC children: pi-workspace-history's 60s cleanup deletes other sessions' shadow repos (`repo.git`) when more than three sessions share a workspace, and its cached validation never re-checks, so the parent TUI spams `fatal: not a git repository` banners on every `turn_end`/`agent_settled`. To isolate children, list the extension sources a child actually needs in `childExtensions` — a non-empty list spawns children with `--no-extensions` plus one `-e` per entry, so nothing else loads (note this removes pi-orchestrator itself too, so the ADR-0007 tool gate and orphan watchdog go quiet unless the package is re-added via `childExtensions`); an empty list keeps the inherit-all default (ADR-0008).
 
 ## Guardrails (optional)
 

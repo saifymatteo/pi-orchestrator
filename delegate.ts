@@ -38,6 +38,7 @@ import { getMarkdownTheme, withFileMutationQueue } from "@earendil-works/pi-codi
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { AgentConfig } from "./agents.ts";
+import { toolMatchesAnyMatcher } from "./config.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -528,6 +529,68 @@ function resolvePiInvocation(): { command: string; argsPrefix: string[] } {
 	return piInvocation;
 }
 
+// ── Child spawn policy (ADR-0008) ───────────────────────────────────────────
+
+/**
+ * Expand blocked matchers to concrete tool names against the parent's tool
+ * registry (ADR-0008): every matcher — exact, glob, or ext:<id> — is resolved
+ * via toolMatchesAnyMatcher (same case-insensitive semantics as the ADR-0007
+ * gate), and each matching tool's name is collected once, in first-seen order.
+ * The names feed pi's `--exclude-tools` comma list, which takes concrete names
+ * only. Matchers that expand to nothing are skipped silently — the interception
+ * gate (ADR-0007) still enforces them child-side.
+ */
+export function expandBlockedToolsToNames(
+	matchers: string[],
+	tools: Array<{ name: string; sourceInfo?: unknown }>,
+): string[] {
+	const names: string[] = [];
+	const seen = new Set<string>();
+	for (const tool of tools) {
+		if (!toolMatchesAnyMatcher(tool, matchers)) continue;
+		if (seen.has(tool.name)) continue;
+		seen.add(tool.name);
+		names.push(tool.name);
+	}
+	return names;
+}
+
+/**
+ * Pure builder for the child pi process arguments (RPC mode). Spawn-time flags
+ * only — the caller appends `--append-system-prompt` after the prompt temp file
+ * is written. Flag semantics per pi's usage docs: `--exclude-tools` is a
+ * comma-separated denylist (single occurrence, concrete names only);
+ * `--no-extensions` disables extension discovery and `-e` re-adds specific
+ * extension sources (repeatable). Extension loading is derived from the
+ * `extensions` list: non-empty ⇒ `--no-extensions` plus one `-e` per entry
+ * (selective loading), empty ⇒ no extension flags at all (children inherit
+ * every discovered extension, ADR-0005/0008).
+ */
+export function buildChildSpawnArgs(opts: {
+	model?: string;
+	/** Only set when the child inherits dispatch config (agent frontmatter has
+	 *  no model — same rule as before this extraction). */
+	thinkingLevel?: ThinkingLevel;
+	tools?: string[];
+	/** Extension sources (orchestrator.json `childExtensions`) loaded via pi's
+	 *  repeatable `-e` flag; non-empty also implies `--no-extensions`. */
+	extensions: string[];
+	/** Concrete tool names unregistered at spawn via `--exclude-tools`
+	 *  (ADR-0008) — already expanded from matchers via expandBlockedToolsToNames. */
+	excludeTools: string[];
+}): string[] {
+	const args: string[] = ["--mode", "rpc", "--no-session"];
+	if (opts.model) args.push("--model", opts.model);
+	if (opts.thinkingLevel) args.push("--thinking", opts.thinkingLevel);
+	if (opts.tools && opts.tools.length > 0) args.push("--tools", opts.tools.join(","));
+	if (opts.extensions.length > 0) {
+		args.push("--no-extensions");
+		for (const ext of opts.extensions) args.push("-e", ext);
+	}
+	if (opts.excludeTools.length > 0) args.push("--exclude-tools", opts.excludeTools.join(","));
+	return args;
+}
+
 // ── Running one subagent ────────────────────────────────────────────────────
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
@@ -546,6 +609,12 @@ async function runSingleAgent(
 	task: string,
 	maxTurns: number,
 	stallTimeoutMs: number,
+	blockedTools: string[],
+	extensions: string[],
+	/** Parent-side tool list for expanding blockedTools to concrete names at
+	 *  spawn time (tools may register after registration — resolved fresh per
+	 *  spawn). */
+	getAllTools: () => Array<{ name: string; sourceInfo?: unknown }>,
 	cwd: string | undefined,
 	step: number | undefined,
 	signal: AbortSignal | undefined,
@@ -572,14 +641,19 @@ async function runSingleAgent(
 		};
 	}
 
-	const args: string[] = ["--mode", "rpc", "--no-session"];
 	const inheritsDispatchConfig = !agent.model;
 	const model = agent.model ?? dispatchDefaults.model;
-	if (model) args.push("--model", model);
-	if (inheritsDispatchConfig && dispatchDefaults.thinkingLevel) {
-		args.push("--thinking", dispatchDefaults.thinkingLevel);
-	}
-	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+	const args = buildChildSpawnArgs({
+		model,
+		thinkingLevel: inheritsDispatchConfig ? dispatchDefaults.thinkingLevel : undefined,
+		tools: agent.tools,
+		extensions,
+		// Always-on unregistration (ADR-0008): every matcher — exact, glob, ext:<id>
+		// — is expanded against the parent's tool registry and removed at spawn;
+		// the interception gate (PI_ORCHESTRATOR_BLOCKED_TOOLS env) stays as backstop
+		// for tools a divergent child loads that the parent cannot see.
+		excludeTools: expandBlockedToolsToNames(blockedTools, getAllTools()),
+	});
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
@@ -618,8 +692,17 @@ async function runSingleAgent(
 	};
 
 	try {
-		if (agent.systemPrompt.trim()) {
-			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
+		// System prompt + tool-policy hint (ADR-0007): the child must know
+		// blocked tools fail before it tries them. The hint is appended to the
+		// combined string so the empty-trim guard below covers both parts — an
+		// empty prompt with no blocked tools writes nothing.
+		const sysPrompt =
+			agent.systemPrompt +
+			(blockedTools.length
+				? `\n\n# Tool policy\nThese tools are blocked by orchestrator policy and will fail if called: ${blockedTools.join(", ")}. Accomplish the task with the remaining tools.`
+				: "");
+		if (sysPrompt.trim()) {
+			const tmp = await writePromptToTempFile(agent.name, sysPrompt);
 			tmpPromptDir = tmp.dir;
 			tmpPromptPath = tmp.filePath;
 			args.push("--append-system-prompt", tmpPromptPath);
@@ -653,7 +736,7 @@ async function runSingleAgent(
 				// EOF, so unlike json -p print mode there is no deadlock.
 				// Orphan detection is heartbeat-based (see installChildWatchdog).
 				stdio: ["pipe", "pipe", "pipe"],
-				env: { ...process.env, PI_ORCHESTRATOR_CHILD: "1" },
+				env: { ...process.env, PI_ORCHESTRATOR_CHILD: "1", PI_ORCHESTRATOR_BLOCKED_TOOLS: blockedTools.join(",") },
 			});
 			liveProcs.add(proc);
 			// Swallow EPIPE: the child may die before/while we write a command.
@@ -928,6 +1011,13 @@ export interface DelegateDeps {
 	/** Stall timeout in ms from orchestrator.json `stallTimeoutMs` (ADR-0006).
 	 *  Falls back to 10 minutes. */
 	getStallTimeoutMs?: () => number;
+	/** Tool matchers blocked in every subagent (ADR-0007), from orchestrator.json
+	 *  `childBlockedTools`. Falls back to none (gate not installed child-side). */
+	getChildBlockedTools?: () => string[];
+	/** Extension sources (orchestrator.json `childExtensions`) loaded in every
+	 *  child via pi's repeatable `-e` flag; non-empty also spawns children with
+	 *  `--no-extensions` (ADR-0008). Falls back to inherit-all. */
+	getChildExtensions?: () => string[];
 }
 
 export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
@@ -949,6 +1039,18 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 			// Per-agent frontmatter `maxTurns` overrides the config default (ADR-0006).
 			const resolveMaxTurns = (agentName: string): number =>
 				agents.find((a) => a.name === agentName)?.maxTurns ?? defaultMaxTurns;
+			// Blocked tools (ADR-0007): additive union of the global config policy
+			// floor (deps.getChildBlockedTools) and per-agent frontmatter
+			// `blockTools` — per-agent matchers can only extend the block list,
+			// never re-grant a globally blocked tool.
+			const resolveBlockedTools = (agentName: string): string[] => {
+				const a = agents.find((x) => x.name === agentName);
+				return [...new Set([...(deps.getChildBlockedTools?.() ?? []), ...(a?.blockTools ?? [])])];
+			};
+			// Child extension loading (ADR-0008): read live per invocation; no
+			// per-agent override — extension loading is a fleet-wide concern, not
+			// an agent-frontmatter one. Non-empty ⇒ --no-extensions + -e entries.
+			const extensions = deps.getChildExtensions?.() ?? [];
 			const makeDetails =
 				(mode: "single" | "parallel" | "chain") =>
 				(results: SingleResult[]): SubagentDetails => ({ mode, results });
@@ -1013,6 +1115,9 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 							taskWithContext,
 							resolveMaxTurns(step.agent),
 							stallTimeoutMs,
+							resolveBlockedTools(step.agent),
+							extensions,
+							() => pi.getAllTools(),
 							step.cwd,
 							i + 1,
 							signal ?? deps.getSignal(),
@@ -1090,6 +1195,9 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 								t.task,
 								resolveMaxTurns(t.agent),
 								stallTimeoutMs,
+								resolveBlockedTools(t.agent),
+								extensions,
+								() => pi.getAllTools(),
 								t.cwd,
 								undefined,
 								signal ?? deps.getSignal(),
@@ -1135,6 +1243,9 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						params.task,
 						resolveMaxTurns(params.agent),
 						stallTimeoutMs,
+						resolveBlockedTools(params.agent),
+						extensions,
+						() => pi.getAllTools(),
 						params.cwd,
 						undefined,
 						signal ?? deps.getSignal(),
