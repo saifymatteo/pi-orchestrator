@@ -80,3 +80,10 @@ $RECYCLE.BIN/
 .pi
 .mcp.json
 .agents
+
+# CodeGraph local index (self-ignoring dir; also cover stray locations)
+.codegraph/
+*.db
+
+# Scratch runtime artifacts
+.scratch
