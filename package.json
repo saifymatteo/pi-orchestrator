@@ -1,0 +1,9 @@
+{
+	"name": "pi-orchestrator",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts"
+	}
+}
