@@ -9,6 +9,14 @@
  *      tools added in future versions, e.g. `recall`)
  *
  * "delegate" is always kept regardless of config (the gate never blocks it).
+ *
+ * The effective keep-list is exactly the config matchers plus `delegate`
+ * (added by the caller) — keep-list-only. `discoverKeptTools` still discovers
+ * non-builtin tools at runtime for the /orchestrator-tools display and the
+ * policy text, but they are NOT kept unless matched by keepTools — unless
+ * `autoKeepExtensions: true` restores the old ADR-0004 auto-keep behavior
+ * (extensions that re-register builtin tool names stay excluded from that
+ * auto-keep unless explicitly listed as `ext:<id>` in keepTools).
  */
 
 import * as fs from "node:fs";
@@ -24,19 +32,28 @@ export interface OrchestratorConfig {
 	builtinFleet: boolean;
 	/** Per-agent model overrides, e.g. { "scout": "openrouter/some-cheap-model" }. */
 	modelOverrides: Record<string, string>;
+	/** When true, every discovered non-builtin extension is auto-kept (old
+	 *  ADR-0004 behavior, minus builtin-shadowing extensions — see
+	 *  discoverKeptTools). Default false: keep-list only — discovered
+	 *  extensions are shown in /orchestrator-tools but not kept unless
+	 *  matched by keepTools. */
+	autoKeepExtensions: boolean;
+	/** Turn budget for subagents (ADR-0006). Must be a positive integer. */
+	maxTurns: number;
+	/** Wall-clock stall timeout for subagents in ms (ADR-0006). Any stdout
+	 *  activity resets it; a child silent for this long is hard-killed. Any
+	 *  positive number (no disable switch — use a huge value instead). */
+	stallTimeoutMs: number;
 }
 
 export const DEFAULT_CONFIG: OrchestratorConfig = {
 	enabled: true,
-	keepTools: [
-		"delegate",
-		"ext:@luxusai/pi-hindsight",
-		"ext:@juicesharp/rpiv-todo",
-		"ext:@juicesharp/rpiv-ask-user-question",
-		"ext:@juicesharp/rpiv-advisor",
-	],
+	keepTools: ["delegate"],
 	builtinFleet: true,
+	autoKeepExtensions: false,
 	modelOverrides: {},
+	maxTurns: 50,
+	stallTimeoutMs: 600_000,
 };
 
 export function getConfigPath(): string {
@@ -53,22 +70,61 @@ export function loadConfig(): OrchestratorConfig {
 				? raw.keepTools.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
 				: DEFAULT_CONFIG.keepTools,
 			builtinFleet: typeof raw.builtinFleet === "boolean" ? raw.builtinFleet : DEFAULT_CONFIG.builtinFleet,
+			autoKeepExtensions:
+				typeof raw.autoKeepExtensions === "boolean" ? raw.autoKeepExtensions : DEFAULT_CONFIG.autoKeepExtensions,
 			modelOverrides:
 				raw.modelOverrides && typeof raw.modelOverrides === "object" && !Array.isArray(raw.modelOverrides)
 					? Object.fromEntries(
 							Object.entries(raw.modelOverrides).filter(([, v]) => typeof v === "string" && v.trim() !== ""),
 						)
 					: {},
+			maxTurns: parseMaxTurns(raw.maxTurns) ?? DEFAULT_CONFIG.maxTurns,
+			stallTimeoutMs: parseStallTimeoutMs(raw.stallTimeoutMs) ?? DEFAULT_CONFIG.stallTimeoutMs,
 		};
 	} catch {
-		return { ...DEFAULT_CONFIG, keepTools: [...DEFAULT_CONFIG.keepTools], modelOverrides: {} };
+		return {
+			...DEFAULT_CONFIG,
+			keepTools: [...DEFAULT_CONFIG.keepTools],
+			modelOverrides: {},
+			maxTurns: DEFAULT_CONFIG.maxTurns,
+		};
 	}
+}
+
+/** Positive integer or undefined (rejects strings, floats, zero, negatives — no coercion). */
+function parseMaxTurns(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/** Positive number (floats allowed — ms precision) or undefined (rejects strings,
+ *  zero, negatives, NaN, Infinity — no coercion). No disable switch: to disable
+ *  the stall watchdog, set a huge value instead. */
+function parseStallTimeoutMs(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 export function saveConfig(config: OrchestratorConfig): void {
 	fs.mkdirSync(path.dirname(getConfigPath()), { recursive: true });
 	fs.writeFileSync(getConfigPath(), `${JSON.stringify(config, null, 2)}\n`, "utf-8");
 }
+
+/**
+ * Canonical pi builtin tool names (lowercase). Kept explicitly because tools
+ * that override a builtin lose their `<builtin:` sourceInfo — registerTool
+ * replaces the builtin wholesale — so the `<builtin:` prefix check in
+ * deriveExtensionId cannot detect the shadow. Verified against pi's docs:
+ * extensions.md / settings.md / usage.md list exactly these eight builtins.
+ */
+export const BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set([
+	"read",
+	"bash",
+	"powershell",
+	"edit",
+	"write",
+	"grep",
+	"find",
+	"ls",
+]);
 
 /** Derive the owning package/extension id from a tool's sourceInfo path. */
 export function deriveExtensionId(tool: { name: string; sourceInfo?: { path?: string; source?: string } }): string {
@@ -99,10 +155,16 @@ function globToRegex(pattern: string): RegExp {
 	return new RegExp(`^${escaped}$`, "i");
 }
 
+/** ext:<id> matcher vs a derived extension id (exact, case-insensitive). */
+function extMatcherMatches(matcher: string, extensionId: string): boolean {
+	const m = matcher.trim().toLowerCase();
+	return m.startsWith("ext:") && extensionId.toLowerCase() === m.slice(4);
+}
+
 function matcherMatches(matcher: string, toolName: string, extensionId: string): boolean {
 	const m = matcher.trim().toLowerCase();
 	if (m.startsWith("ext:")) {
-		return extensionId.toLowerCase() === m.slice(4); // exact, case-insensitive
+		return extMatcherMatches(matcher, extensionId);
 	}
 	if (m.includes("*") || m.includes("?")) return globToRegex(m).test(toolName);
 	return toolName.toLowerCase() === m;
@@ -119,6 +181,111 @@ export function toolIsKept(
 	if (tool.name === "delegate") return true;
 	const extensionId = deriveExtensionId(tool);
 	return keepTools.some((matcher) => matcherMatches(matcher, tool.name, extensionId));
+}
+
+/** A tool discovered at runtime, grouped by its owning extension/package (ADR-0004). */
+export interface DiscoveredTool {
+	/** Owning extension id, as returned by deriveExtensionId. */
+	extensionId: string;
+	/** Tool names registered under this extension id (shadow-skipped ones excluded). */
+	names: string[];
+	/** True when at least one tool of this extension was builtin-shadow-skipped.
+	 *  effectiveKeepTools must then emit per-name matchers instead of `ext:<id>`,
+	 *  which would re-keep the shadowed builtin too. */
+	partial: boolean;
+}
+
+/**
+ * Discover the non-builtin tools currently installed (ADR-0004).
+ *
+ * Accepts a plain tool array (pi's getAllTools() shape) so config.ts stays
+ * free of pi imports. `delegate` and builtin tools are excluded; the rest
+ * are grouped and deduped by extensionId.
+ *
+ * Tools whose name shadows a pi builtin (BUILTIN_TOOL_NAMES) are excluded —
+ * registerTool strips the builtin's `<builtin:` sourceInfo, so the shadow
+ * would otherwise be auto-kept and resurrect the builtin — unless the tool's
+ * derived extension id is explicitly referenced as `ext:<id>` in
+ * `configKeepTools` (case-insensitive), which re-enables the whole extension.
+ */
+export function discoverKeptTools(
+	tools: Array<{ name: string; sourceInfo?: { path?: string; source?: string } }>,
+	configKeepTools: string[],
+): DiscoveredTool[] {
+	const byExtension = new Map<string, DiscoveredTool>();
+	// Extensions with at least one builtin-shadow-skipped tool (see loop below).
+	// Tracked separately because a shadowed tool may be visited before or after
+	// its non-colliding siblings create the group entry.
+	const shadowSkipped = new Set<string>();
+	for (const tool of tools) {
+		if (tool.name === "delegate") continue;
+		const extensionId = deriveExtensionId(tool);
+		if (extensionId === "builtin") continue;
+		// Tools with no sourceInfo derive the "unknown" extension id; keeping
+		// them via `ext:unknown` would bypass the keep-list gate blindly, so
+		// they are not auto-kept (they can still be kept via explicit matchers).
+		if (extensionId === "unknown") continue;
+		// Shadowed builtin names are not auto-kept (see docblock) unless this
+		// extension is explicitly opted in via an `ext:<id>` config matcher.
+		if (
+			BUILTIN_TOOL_NAMES.has(tool.name.toLowerCase()) &&
+			!configKeepTools.some((matcher) => extMatcherMatches(matcher, extensionId))
+		) {
+			shadowSkipped.add(extensionId);
+			continue;
+		}
+
+		let entry = byExtension.get(extensionId);
+		if (!entry) {
+			entry = { extensionId, names: [], partial: false };
+			byExtension.set(extensionId, entry);
+		}
+		if (!entry.names.includes(tool.name)) entry.names.push(tool.name);
+	}
+	// Assign after the loop so visit order doesn't matter: a shadowed tool
+	// seen after its group entry exists must still mark the group partial.
+	for (const entry of byExtension.values()) {
+		entry.partial = shadowSkipped.has(entry.extensionId);
+	}
+	return Array.from(byExtension.values());
+}
+
+/**
+ * The effective keep-list. By default (autoKeepExtensions=false) it is
+ * exactly the config matchers (deduped) — keep-list-only. With
+ * autoKeepExtensions=true, an `ext:<id>` matcher is added for every
+ * fully-kept discovered extension (ADR-0004 auto-keep). A *partial*
+ * extension — one of whose tools was builtin-shadow-skipped (see
+ * discoverKeptTools) — instead gets one exact per-name matcher for each
+ * surviving tool, so the siblings are kept without the `ext:<id>` matcher
+ * re-keeping the shadowed builtin. An explicit `ext:<id>` config entry
+ * always wins: the whole extension is kept and the partial splitting is
+ * skipped for it. Derived per turn — never persisted; only
+ * `config.keepTools` is written back to orchestrator.json.
+ */
+export function effectiveKeepTools(
+	configKeepTools: string[],
+	discovered: DiscoveredTool[],
+	autoKeepExtensions: boolean = false,
+): string[] {
+	const matchers = new Set<string>();
+	for (const matcher of configKeepTools) {
+		const trimmed = matcher.trim();
+		if (trimmed) matchers.add(trimmed);
+	}
+	if (!autoKeepExtensions) return Array.from(matchers);
+	for (const d of discovered) {
+		// Defense-in-depth: discoverKeptTools never shadow-skips an extension
+		// that config explicitly opts in via `ext:<id>`, but effectiveKeepTools
+		// is a pure function callable with arbitrary inputs.
+		const explicitlyKept = configKeepTools.some((m) => extMatcherMatches(m, d.extensionId));
+		if (!explicitlyKept && d.partial) {
+			for (const name of d.names) matchers.add(name);
+		} else {
+			matchers.add(`ext:${d.extensionId}`);
+		}
+	}
+	return Array.from(matchers);
 }
 
 /** Matchers currently responsible for keeping a tool (used by the /orchestrator-tools UI). */

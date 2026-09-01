@@ -1,19 +1,33 @@
 /**
  * The `delegate` tool — the orchestrator's only path to real work.
  *
- * Spawns child `pi` processes (--mode json -p --no-session) with isolated
+ * Spawns child `pi` processes (--mode rpc --no-session) with isolated
  * contexts and the FULL toolset. Children carry PI_ORCHESTRATOR_CHILD=1 so
  * the extension self-disables inside them (flat orchestration, ADR-0002).
  *
+ * RPC mode (pi's RPC documentation, `pi --mode rpc`): commands are JSON
+ * lines written to the child's
+ * stdin (one `prompt` command kicks off the task; `steer` delivers the
+ * turn-budget grace message), events stream back as JSON lines on stdout.
+ * stdin MUST be a held-open pipe ("pipe"): unlike json -p print mode,
+ * RPC mode reads commands from stdin and does NOT wait for EOF, so there
+ * is no deadlock — and holding it open is required to send the prompt.
+ * Success is STATE-based (agent_settled), not exit-code-based: RPC mode
+ * never exits on its own, so the orchestrator kills the child after
+ * settle (exit code is informational only).
+ *
  * Orphan safety (user requirement: no background agents after pi dies):
- *   - Children get stdin="ignore" (a held-open stdin pipe deadlocks pi's
- *     print mode, which waits for stdin EOF before exiting).
+ *   - Children get a held-open stdin pipe (see above); a runaway child is
+ *     reaped by the turn budget (hard kill at maxTurns + 5), the stall
+ *     watchdog (hard kill after stallTimeoutMs of silence, ADR-0006),
+ *     or shutdown.
  *   - Child-side watchdog (installed in index.ts) polls the parent PID and
  *     exits the child when the parent disappears (catches SIGKILL within 5s).
  *   - Normal paths: abort signal (Esc) and session_shutdown kill children.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -29,6 +43,16 @@ const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
+/** Turn budget default (ADR-0006); overridden by orchestrator.json `maxTurns`
+ *  (via deps.getMaxTurns) or per-agent frontmatter `maxTurns`. */
+const DEFAULT_MAX_TURNS = 50;
+/** Hard-kill grace margin past the soft-grace budget (ADR-0006). */
+const TURN_BUDGET_GRACE = 5;
+/** Stall watchdog default (ADR-0006): orchestrator.json `stallTimeoutMs`
+ *  (via deps.getStallTimeoutMs) overrides this. */
+const DEFAULT_STALL_TIMEOUT_MS = 600_000;
+/** How often the stall watchdog checks for silence. */
+const STALL_CHECK_INTERVAL_MS = 15_000;
 
 // ── Fleet widget state (live subagent progress) ─────────────────────────────
 
@@ -36,6 +60,8 @@ interface RunningTask {
 	id: string;
 	agent: string;
 	task: string;
+	/** Dispatch mode of the delegate call that spawned this task. */
+	mode: "single" | "parallel" | "chain";
 	turns: number;
 	contextTokens: number;
 	inputTokens: number;
@@ -51,21 +77,50 @@ function formatTokens(count: number): string {
 	return `${(count / 1000000).toFixed(1)}M`;
 }
 
+/** Longest agent name shown in a fleet widget line before hard truncation. */
+const MAX_AGENT_NAME_WIDTH = 12;
+/** Task summary cap in a fleet widget line (ellipsis included). */
+const MAX_TASK_SUMMARY_CHARS = 40;
+
+function truncateWithEllipsis(text: string, max: number): string {
+	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/**
+ * Pure line builder for the fleet widget: grouped header (dispatch mode +
+ * running count) with one indented line per running task, or the idle
+ * fallback line when nothing runs.
+ */
+export function renderFleetLines(tasks: RunningTask[], agentNames: string[]): string[] {
+	if (tasks.length === 0) {
+		return idleFleetWidgetLines(agentNames);
+	}
+	const modes = new Set(tasks.map((t) => t.mode));
+	const mode = modes.size === 1 ? tasks[0].mode : "mixed";
+	const lines: string[] = [`⏳ Fleet · ${mode} · ${tasks.length} running`];
+	// Pad to the longest current name (capped) for column alignment; names past
+	// the cap are truncated so the columns can never blow past it either.
+	const nameWidth = Math.min(MAX_AGENT_NAME_WIDTH, Math.max(...tasks.map((t) => t.agent.length)));
+	for (const task of tasks) {
+		const name =
+			task.agent.length > MAX_AGENT_NAME_WIDTH
+				? task.agent.slice(0, MAX_AGENT_NAME_WIDTH)
+				: task.agent.padEnd(nameWidth);
+		const summary = truncateWithEllipsis(task.task, MAX_TASK_SUMMARY_CHARS);
+		lines.push(
+			`  ${name} · turn ${task.turns} · ctx ${formatTokens(task.contextTokens)}` +
+				` · ↑${formatTokens(task.inputTokens)} ↓${formatTokens(task.outputTokens)} · "${summary}"`,
+		);
+	}
+	return lines;
+}
+
 function updateFleetWidget(
 	ctx: { ui: { setWidget(id: string, lines: string[] | undefined, opts?: unknown): void } },
 	agentNames: string[],
 ): void {
 	if (!ctx.ui?.setWidget) return;
-	const lines: string[] = [];
-	for (const task of runningTasks.values()) {
-		lines.push(
-			`⏳ ${task.agent} · turn ${task.turns} · ctx ${formatTokens(task.contextTokens)} · ↑${formatTokens(task.inputTokens)} ↓${formatTokens(task.outputTokens)}`,
-		);
-	}
-	if (lines.length === 0) {
-		lines.push(`orchestrator: engaged · fleet: ${agentNames.join(", ") || "(empty)"}`);
-	}
-	ctx.ui.setWidget("orchestrator-fleet", lines);
+	ctx.ui.setWidget("orchestrator-fleet", renderFleetLines([...runningTasks.values()], agentNames));
 }
 
 export function clearFleetWidget(ui: { setWidget(id: string, lines: string[] | undefined, opts?: unknown): void }): void {
@@ -89,9 +144,11 @@ export function killAllFleet(): void {
 	for (const proc of liveProcs) {
 		try {
 			proc.kill("SIGTERM");
+			// Unconditional escalation — proc.killed reflects a kill()
+			// CALL, not process death, so gating on it never fires.
 			setTimeout(() => {
 				try {
-					if (!proc.killed) proc.kill("SIGKILL");
+					proc.kill("SIGKILL");
 				} catch {
 					/* already gone */
 				}
@@ -101,6 +158,49 @@ export function killAllFleet(): void {
 		}
 	}
 	liveProcs.clear();
+}
+
+/**
+ * Send an RPC command to the child's stdin (JSON + newline, per rpc.md).
+ * EPIPE-safe: the child may have died or closed stdin between checks.
+ */
+function sendRpc(proc: ChildProcess, obj: Record<string, unknown>): void {
+	try {
+		proc.stdin?.write(`${JSON.stringify(obj)}\n`);
+	} catch {
+		/* child gone / stream destroyed — nothing to send to */
+	}
+}
+
+/**
+ * Strict JSONL reader per rpc.md's framing rules: split on `\n` ONLY, strip a
+ * trailing `\r`, flush any trailing bytes on stream end. StringDecoder keeps
+ * multi-byte UTF-8 characters split across chunks intact. Deliberately NOT
+ * Node readline, which also splits on U+2028/U+2029 — valid inside JSON
+ * strings — and would corrupt the protocol.
+ */
+function attachJsonlReader(stream: NodeJS.ReadableStream, onLine: (line: string) => void): void {
+	const decoder = new StringDecoder("utf8");
+	let buffer = "";
+
+	stream.on("data", (chunk: Buffer | string) => {
+		buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
+		while (true) {
+			const newlineIndex = buffer.indexOf("\n");
+			if (newlineIndex === -1) break;
+			let line = buffer.slice(0, newlineIndex);
+			buffer = buffer.slice(newlineIndex + 1);
+			if (line.endsWith("\r")) line = line.slice(0, -1);
+			onLine(line);
+		}
+	});
+
+	stream.on("end", () => {
+		buffer += decoder.end();
+		if (buffer.length > 0) {
+			onLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
+		}
+	});
 }
 
 // ── Display helpers (adapted from pi's subagent example) ────────────────────
@@ -209,9 +309,13 @@ interface UsageStats {
 
 interface SingleResult {
 	agent: string;
-	agentSource: "user" | "builtin" | "unknown";
+	/** "project" = discovered from the project tree (project agents win on collision). */
+	agentSource: "user" | "builtin" | "project" | "unknown";
 	task: string;
+	/** Informational only: RPC children are SIGTERMed intentionally after settle. */
 	exitCode: number;
+	/** False until the child reached agent_settled (state-based success). */
+	completedNormally: boolean;
 	messages: Message[];
 	stderr: string;
 	usage: UsageStats;
@@ -238,11 +342,28 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
+/**
+ * Failure is state-based, never exit-code-based: RPC children are killed
+ * (SIGTERM) right after agent_settled, so their exit code is not meaningful.
+ */
 function isFailedResult(result: SingleResult): boolean {
-	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+	return (
+		!result.completedNormally ||
+		result.stopReason === "error" ||
+		result.stopReason === "aborted" ||
+		result.stopReason === "turn-budget-exhausted" ||
+		result.stopReason === "stall-timeout"
+	);
 }
 
 function getResultOutput(result: SingleResult): string {
+	// Budget-exhausted and stall-killed runs report the reason AND everything
+	// captured so far.
+	if (result.stopReason === "turn-budget-exhausted" || result.stopReason === "stall-timeout") {
+		const partial = getFinalOutput(result.messages);
+		const reason = result.errorMessage || "Run was killed";
+		return partial ? `${reason}\n\nPartial output:\n${partial}` : reason;
+	}
 	if (isFailedResult(result)) {
 		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
 	}
@@ -373,11 +494,15 @@ async function runSingleAgent(
 	agents: AgentConfig[],
 	agentName: string,
 	task: string,
+	maxTurns: number,
+	stallTimeoutMs: number,
 	cwd: string | undefined,
 	step: number | undefined,
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	/** Dispatch mode for the fleet widget line (single/parallel/chain). */
+	fleetMode: RunningTask["mode"],
 	onFleetChange: () => void,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
@@ -389,6 +514,7 @@ async function runSingleAgent(
 			agentSource: "unknown",
 			task,
 			exitCode: 1,
+			completedNormally: false,
 			messages: [],
 			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
@@ -396,7 +522,7 @@ async function runSingleAgent(
 		};
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	const args: string[] = ["--mode", "rpc", "--no-session"];
 	const inheritsDispatchConfig = !agent.model;
 	const model = agent.model ?? dispatchDefaults.model;
 	if (model) args.push("--model", model);
@@ -413,6 +539,7 @@ async function runSingleAgent(
 		agentSource: agent.source,
 		task,
 		exitCode: 0,
+		completedNormally: false,
 		messages: [],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
@@ -424,6 +551,7 @@ async function runSingleAgent(
 		id: agentKey,
 		agent: agentName,
 		task,
+		mode: fleetMode,
 		turns: 0,
 		contextTokens: 0,
 		inputTokens: 0,
@@ -447,8 +575,22 @@ async function runSingleAgent(
 			args.push("--append-system-prompt", tmpPromptPath);
 		}
 
-		args.push(`Task: ${task}`);
 		let wasAborted = false;
+		let settled = false;
+		let budgetWarned = false;
+
+		// Stall watchdog (ADR-0006): a child stalled mid-turn emits no events,
+		// so the turn budget never fires. Any stdout line resets lastEventAt;
+		// silence past stallTimeoutMs is hard-killed like budget exhaustion.
+		let watchdogActive = true;
+		let lastEventAt = Date.now();
+		let stallTimer: NodeJS.Timeout | undefined;
+		const stopStallWatchdog = () => {
+			if (watchdogActive) {
+				watchdogActive = false;
+				if (stallTimer) clearInterval(stallTimer);
+			}
+		};
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = resolvePiInvocation();
@@ -456,21 +598,63 @@ async function runSingleAgent(
 				cwd: cwd ?? defaultCwd,
 				shell: false,
 				windowsHide: true,
-				// stdin MUST be "ignore": pi's print mode waits for stdin EOF
-				// when stdin is a pipe → deadlock if we hold it open.
+				// stdin MUST be a held-open pipe: RPC mode reads JSON commands
+				// from stdin (the prompt is sent below) and does NOT wait for
+				// EOF, so unlike json -p print mode there is no deadlock.
 				// Orphan detection is heartbeat-based (see installChildWatchdog).
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: ["pipe", "pipe", "pipe"],
 				env: { ...process.env, PI_ORCHESTRATOR_CHILD: "1" },
 			});
 			liveProcs.add(proc);
+			// Swallow EPIPE: the child may die before/while we write a command.
+			proc.stdin?.on("error", () => {});
 			// Track for the fleet widget
 			fleetTask.turns = 0;
 			runningTasks.set(agentKey, fleetTask);
 			onFleetChange();
 
-			let buffer = "";
+			/** SIGTERM the child, escalating to SIGKILL after 5s. */
+			const killChild = () => {
+				try {
+					proc.kill("SIGTERM");
+				} catch {
+					/* already gone */
+				}
+				// Escalate unconditionally: proc.killed only reflects a
+				// successful kill() CALL, not process death, so gating on it
+				// was dead code — a child trapping/ignoring SIGTERM would
+				// linger forever. Killing an already-exited child is a
+				// silent no-op (or caught below).
+				const t = setTimeout(() => {
+					try {
+						proc.kill("SIGKILL");
+					} catch {
+						/* already gone */
+					}
+				}, 5000);
+				t.unref();
+			};
+
+			// Interval body references killChild, so the timer starts inside
+			// the executor. Cleared by stopStallWatchdog() on every terminal
+			// path (settle, budget kill, stall kill, abort, close/error).
+			stallTimer = setInterval(() => {
+				if (!watchdogActive || settled || wasAborted) return;
+				if (Date.now() - lastEventAt <= stallTimeoutMs) return;
+				stopStallWatchdog();
+				currentResult.stopReason = "stall-timeout";
+				currentResult.errorMessage =
+					`Stall timeout: no output for ${Math.round(stallTimeoutMs / 1000)}s ` +
+					`(killed after ${currentResult.usage.turns} turns). Captured output up to this point is preserved.`;
+				currentResult.completedNormally = false;
+				killChild();
+			}, STALL_CHECK_INTERVAL_MS);
+			stallTimer.unref?.();
 
 			const processLine = (line: string) => {
+				// Every stdout line counts as activity — response lines, message
+				// deltas, tool events, even unparseable noise (ADR-0006).
+				lastEventAt = Date.now();
 				if (!line.trim()) return;
 				let event: any;
 				try {
@@ -479,13 +663,37 @@ async function runSingleAgent(
 					return;
 				}
 
+				// Command responses (rpc.md): the prompt was rejected before
+				// acceptance → fail the run. Failures AFTER acceptance arrive
+				// through the normal event stream instead.
+				if (event.type === "response") {
+					if (event.id === "init" && event.success === false) {
+						stopStallWatchdog();
+						currentResult.stopReason = "error";
+						currentResult.errorMessage = `RPC prompt rejected: ${event.error || "unknown error"}`;
+						killChild();
+					}
+					return;
+				}
+
+				// Headless fail-closed (ADR-0005): dialog methods (select/
+				// confirm/input/editor) block until answered — with no user
+				// watching they would hang the child forever. Cancel them.
+				// Fire-and-forget methods (notify, setWidget, ...) need no reply.
+				if (event.type === "extension_ui_request" && event.id) {
+					if (event.method === "select" || event.method === "confirm" || event.method === "input" || event.method === "editor") {
+						sendRpc(proc, { type: "extension_ui_response", id: event.id, cancelled: true });
+					}
+					return;
+				}
+
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
+					// Collect every conversation message (assistant / user /
+					// toolResult). RPC mode has no tool_result_end event.
 					currentResult.messages.push(msg);
 
 					if (msg.role === "assistant") {
-						currentResult.usage.turns++;
-						fleetTask.turns = currentResult.usage.turns;
 						const usage = msg.usage;
 						if (usage) {
 							currentResult.usage.input += usage.input || 0;
@@ -499,38 +707,85 @@ async function runSingleAgent(
 							fleetTask.outputTokens = currentResult.usage.output;
 						}
 						if (!currentResult.model && msg.model) currentResult.model = msg.model;
-						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
+						// Terminal reasons set by the stall/budget killers must
+						// win over buffered stdout events arriving after the kill
+						// (first killer wins; a trailing message_end must not
+						// overwrite "stall-timeout"/"turn-budget-exhausted").
+						if (
+							msg.stopReason &&
+							currentResult.stopReason !== "turn-budget-exhausted" &&
+							currentResult.stopReason !== "stall-timeout"
+						) {
+							currentResult.stopReason = msg.stopReason;
+						}
 						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 					}
 					emitUpdate();
 					onFleetChange();
 				}
 
-				if (event.type === "tool_result_end" && event.message) {
-					currentResult.messages.push(event.message as Message);
-					emitUpdate();
+				// One assistant turn = one turn_end with an assistant message.
+				if (event.type === "turn_end" && event.message?.role === "assistant" && !settled) {
+					currentResult.usage.turns++;
+					fleetTask.turns = currentResult.usage.turns;
+
+					// Two-stage turn budget (ADR-0006): soft grace at the
+					// budget (once), hard kill after the grace margin.
+					if (currentResult.usage.turns === maxTurns && !budgetWarned) {
+						budgetWarned = true;
+						// Tolerate rejection (e.g. agent not streaming anymore).
+						sendRpc(proc, {
+							type: "steer",
+							message: "You are near your turn budget. Wrap up now and deliver your final answer.",
+						});
+					}
+					if (currentResult.usage.turns >= maxTurns + TURN_BUDGET_GRACE) {
+						stopStallWatchdog();
+						// First killer wins: buffered turn_end lines after a
+						// stall kill must not relabel the run as budget-exhausted.
+						// (The stall side is already guarded: budget kill calls
+						// stopStallWatchdog() first, so the stall timer no-ops.)
+						if (currentResult.stopReason !== "stall-timeout") {
+							currentResult.stopReason = "turn-budget-exhausted";
+							currentResult.errorMessage =
+								`Turn budget exhausted: hard-killed at turn ${currentResult.usage.turns} ` +
+								`(soft grace steered at turn ${maxTurns}, hard limit ${maxTurns + TURN_BUDGET_GRACE}). ` +
+								`Captured output up to this turn is preserved.`;
+							currentResult.completedNormally = false;
+						}
+						killChild();
+					}
+					onFleetChange();
+				}
+
+				// RPC mode never exits on its own: settled means done. Success
+				// is state-based (this event), not exit-code-based. Kill the
+				// child — the exit code is informational only.
+				if (event.type === "agent_settled" && !settled) {
+					settled = true;
+					stopStallWatchdog();
+					if (currentResult.stopReason !== "turn-budget-exhausted" && currentResult.stopReason !== "stall-timeout") {
+						currentResult.completedNormally = true;
+					}
+					killChild();
+					onFleetChange();
 				}
 			};
 
-			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) processLine(line);
-			});
+			attachJsonlReader(proc.stdout!, processLine);
 
 			proc.stderr.on("data", (data) => {
 				currentResult.stderr += data.toString();
 			});
 
 			const cleanup = () => {
+				stopStallWatchdog();
 				liveProcs.delete(proc);
 				runningTasks.delete(agentKey);
 				onFleetChange();
 			};
 
 			proc.on("close", (code) => {
-				if (buffer.trim()) processLine(buffer);
 				cleanup();
 				resolve(code ?? 0);
 			});
@@ -543,14 +798,26 @@ async function runSingleAgent(
 			if (signal) {
 				const killProc = () => {
 					wasAborted = true;
+					stopStallWatchdog();
 					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
+					// Unconditional escalation — see killChild above for why a
+					// proc.killed gate would be dead code.
+					const t = setTimeout(() => {
+						try {
+							proc.kill("SIGKILL");
+						} catch {
+							/* already gone */
+						}
 					}, 5000);
+					t.unref();
 				};
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", killProc, { once: true });
 			}
+
+			// Kick off the task. Sending via stdin is why stdin is a pipe; a
+			// rejected prompt is failed via the "init" response above.
+			sendRpc(proc, { id: "init", type: "prompt", message: `Task: ${task}` });
 		});
 
 		currentResult.exitCode = exitCode;
@@ -605,6 +872,12 @@ export interface DelegateDeps {
 	getCwd: () => string;
 	getSignal: () => AbortSignal | undefined;
 	onIdle: () => void;
+	/** Default turn budget from orchestrator.json `maxTurns` (ADR-0006);
+	 *  per-agent frontmatter `maxTurns` overrides this. Falls back to 50. */
+	getMaxTurns?: () => number;
+	/** Stall timeout in ms from orchestrator.json `stallTimeoutMs` (ADR-0006).
+	 *  Falls back to 10 minutes. */
+	getStallTimeoutMs?: () => number;
 }
 
 export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
@@ -621,9 +894,11 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 		async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {
 			const agents = deps.getAgents();
 			const dispatchDefaults = deps.getDispatchDefaults(ctx);
-			let taskCounter = 0;
-			const nextKey = () => `t${++taskCounter}-${Date.now()}`;
-
+			const defaultMaxTurns = deps.getMaxTurns?.() ?? DEFAULT_MAX_TURNS;
+			const stallTimeoutMs = deps.getStallTimeoutMs?.() ?? DEFAULT_STALL_TIMEOUT_MS;
+			// Per-agent frontmatter `maxTurns` overrides the config default (ADR-0006).
+			const resolveMaxTurns = (agentName: string): number =>
+				agents.find((a) => a.name === agentName)?.maxTurns ?? defaultMaxTurns;
 			const makeDetails =
 				(mode: "single" | "parallel" | "chain") =>
 				(results: SingleResult[]): SubagentDetails => ({ mode, results });
@@ -677,11 +952,14 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 							agents,
 							step.agent,
 							taskWithContext,
+							resolveMaxTurns(step.agent),
+							stallTimeoutMs,
 							step.cwd,
 							i + 1,
 							signal ?? deps.getSignal(),
 							chainUpdate,
 							makeDetails("chain"),
+							"chain",
 							fleetChanged,
 						);
 						results.push(result);
@@ -716,6 +994,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 							agentSource: "unknown",
 							task: params.tasks[i].task,
 							exitCode: -1,
+							completedNormally: false,
 							messages: [],
 							stderr: "",
 							usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
@@ -733,30 +1012,37 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						}
 					};
 
-					const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
-						const result = await runSingleAgent(
-							deps.getCwd(),
-							`task${index}`,
-							dispatchDefaults,
-							agents,
-							t.agent,
-							t.task,
-							t.cwd,
-							undefined,
-							signal ?? deps.getSignal(),
-							(partial) => {
-								if (partial.details?.results[0]) {
-									allResults[index] = partial.details.results[0];
-									emitParallelUpdate();
-								}
-							},
-							makeDetails("parallel"),
-							fleetChanged,
-						);
-						allResults[index] = result;
-						emitParallelUpdate();
-						return result;
-					});
+					const results = await mapWithConcurrencyLimit(
+						params.tasks as { agent: string; task: string; cwd?: string }[],
+						MAX_CONCURRENCY,
+						async (t, index) => {
+							const result = await runSingleAgent(
+								deps.getCwd(),
+								`task${index}`,
+								dispatchDefaults,
+								agents,
+								t.agent,
+								t.task,
+								resolveMaxTurns(t.agent),
+								stallTimeoutMs,
+								t.cwd,
+								undefined,
+								signal ?? deps.getSignal(),
+								(partial) => {
+									if (partial.details?.results[0]) {
+										allResults[index] = partial.details.results[0];
+										emitParallelUpdate();
+									}
+								},
+								makeDetails("parallel"),
+								"parallel",
+								fleetChanged,
+							);
+							allResults[index] = result;
+							emitParallelUpdate();
+							return result;
+						},
+					);
 
 					const successCount = results.filter((r) => !isFailedResult(r)).length;
 					const summaries = results.map((r) => {
@@ -782,11 +1068,14 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						agents,
 						params.agent,
 						params.task,
+						resolveMaxTurns(params.agent),
+						stallTimeoutMs,
 						params.cwd,
 						undefined,
 						signal ?? deps.getSignal(),
 						onUpdate,
 						makeDetails("single"),
+						"single",
 						fleetChanged,
 					);
 					if (isFailedResult(result)) {
@@ -851,7 +1140,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 			return new Text(text, 0, 0);
 		},
 
-		renderResult(result: any, { expanded }: any, theme: any, _context: any) {
+		renderResult(result: any, { expanded, isPartial }: any, theme: any, context: any) {
 			const details = result.details as SubagentDetails | undefined;
 			if (!details || details.results.length === 0) {
 				const text = result.content[0];
@@ -891,8 +1180,15 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
-				const isError = isFailedResult(r);
-				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				// Mid-run, pi re-invokes renderResult with isPartial=true and the child's
+				// stopReason is transiently "toolUse" — render as running, not failed.
+				const isRunning = isPartial === true || context?.isPartial === true || r.exitCode === -1;
+				const isError = !isRunning && isFailedResult(r);
+				const icon = isRunning
+					? theme.fg("warning", "⏳")
+					: isError
+						? theme.fg("error", "✗")
+						: theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
 
@@ -909,7 +1205,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 					container.addChild(new Spacer(1));
 					container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
 					if (displayItems.length === 0 && !finalOutput) {
-						container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
+						container.addChild(new Text(theme.fg("muted", isRunning ? "(running...)" : "(no output)"), 0, 0));
 					} else {
 						for (const item of displayItems) {
 							if (item.type === "toolCall") {
@@ -934,7 +1230,8 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
-				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
+				else if (displayItems.length === 0)
+					text += `\n${theme.fg("muted", isRunning ? "(running...)" : "(no output)")}`;
 				else {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
 					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;

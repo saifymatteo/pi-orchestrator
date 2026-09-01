@@ -16,9 +16,19 @@
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
 import { discoverAgents } from "./agents.ts";
-import { matchersForTool, toolIsKept, loadConfig, saveConfig, type OrchestratorConfig } from "./config.ts";
+import {
+	discoverKeptTools,
+	effectiveKeepTools,
+	matchersForTool,
+	toolIsKept,
+	loadConfig,
+	saveConfig,
+	type DiscoveredTool,
+	type OrchestratorConfig,
+} from "./config.ts";
 import { clearFleetWidget, idleFleetWidgetLines, killAllFleet, registerDelegateTool } from "./delegate.ts";
 import { buildPolicy } from "./policy.ts";
+import { truncateToWidth } from "./width.ts";
 import type { AgentConfig } from "./agents.ts";
 
 // ── Child mode: orphan watchdog, nothing else ───────────────────────────────
@@ -36,9 +46,9 @@ function installChildWatchdog(): void {
 	};
 
 	// Heartbeat: if the parent PID disappears, exit. (Parent death, even
-	// SIGKILL, is caught within 5s. stdin is "ignore" in children — pi's
-	// print mode would deadlock waiting for stdin EOF on a held-open pipe,
-	// so stdin-close can't be used as a liveness signal.)
+	// SIGKILL, is caught within 5s. Children are spawned with all three
+	// stdio pipes (RPC mode), so stdin never closes and cannot serve as a
+	// liveness signal — detection is heartbeat-based.)
 	const heartbeat = setInterval(() => {
 		try {
 			process.kill(parentPid, 0);
@@ -60,6 +70,9 @@ export default function (pi: any) {
 	let config: OrchestratorConfig = loadConfig();
 	let engaged = config.enabled;
 	let lastUi: any;
+	// Non-builtin tools discovered at runtime (ADR-0004); refreshed on every
+	// applyReduction() so late-registered tools are picked up.
+	let discovered: DiscoveredTool[] = [];
 
 	function updateIdleWidget(): void {
 		if (!lastUi?.setWidget) return;
@@ -77,8 +90,10 @@ export default function (pi: any) {
 	function applyReduction(): void {
 		try {
 			const all: any[] = pi.getAllTools();
+			discovered = discoverKeptTools(all, config.keepTools);
 			if (engaged) {
-				const kept = all.filter((t) => toolIsKept(t, config.keepTools)).map((t) => t.name);
+				const effective = effectiveKeepTools(config.keepTools, discovered, config.autoKeepExtensions);
+				const kept = all.filter((t) => toolIsKept(t, effective)).map((t) => t.name);
 				pi.setActiveTools(Array.from(new Set([...kept, "delegate"])));
 			} else {
 				pi.setActiveTools(all.map((t) => t.name));
@@ -148,7 +163,19 @@ export default function (pi: any) {
 		applyReduction();
 
 		const agents: AgentConfig[] = discoverAgents(config);
-		return { systemPrompt: `${event.systemPrompt}\n\n${buildPolicy(agents, config)}` };
+		// Policy text must only advertise tools the gate actually allows: under
+		// keep-list-only (autoKeepExtensions:false) most discovered extensions
+		// are not kept, so filter the discovered groups down to the kept tools.
+		const effective = effectiveKeepTools(config.keepTools, discovered, config.autoKeepExtensions);
+		const keptDiscovered = discovered
+			.map((d) => ({
+				...d,
+				// source: d.extensionId makes deriveExtensionId return the same id
+				// discoverKeptTools derived (d.names excludes shadow-skipped tools).
+				names: d.names.filter((n) => toolIsKept({ name: n, sourceInfo: { source: d.extensionId } }, effective)),
+			}))
+			.filter((d) => d.names.length > 0);
+		return { systemPrompt: `${event.systemPrompt}\n\n${buildPolicy(agents, config, keptDiscovered)}` };
 	});
 
 	// ── Hard gate (ADR-0001) ────────────────────────────────────────────────
@@ -158,15 +185,17 @@ export default function (pi: any) {
 		if (event.toolName === "delegate") return;
 
 		const tool = pi.getAllTools().find((t: any) => t.name === event.toolName);
-		const allowed = toolIsKept({ name: event.toolName, sourceInfo: tool?.sourceInfo }, config.keepTools);
+		const effective = effectiveKeepTools(config.keepTools, discovered, config.autoKeepExtensions);
+		const allowed = toolIsKept({ name: event.toolName, sourceInfo: tool?.sourceInfo }, effective);
 		if (allowed) return;
 
+		const fleetNames = discoverAgents(config).map((a) => a.name).join(", ");
 		return {
 			block: true,
 			reason:
 				`Blocked: you are an ORCHESTRATOR. "${event.toolName}" is not on your allow-list. ` +
-				`Delegate this work instead: delegate({ agent: "...", task: "..." }) — ` +
-				`use scout for recon/search, worker for implementation, reviewer for verification. ` +
+				`Delegate this work instead: delegate({ agent: "...", task: "..." }). ` +
+				`Available agents: ${fleetNames || "(none)"}. ` +
 				`Task prompts must be self-contained (subagents cannot see this conversation).`,
 		};
 	});
@@ -181,6 +210,8 @@ export default function (pi: any) {
 		}),
 		getCwd: () => process.cwd(),
 		getSignal: () => undefined,
+		getMaxTurns: () => config.maxTurns,
+		getStallTimeoutMs: () => config.stallTimeoutMs,
 		onIdle: () => updateIdleWidget(),
 	});
 
@@ -204,21 +235,37 @@ export default function (pi: any) {
 			}
 
 			const allTools: any[] = pi.getAllTools();
+			const effective = effectiveKeepTools(config.keepTools, discovered, config.autoKeepExtensions);
 			const items: SettingItem[] = allTools.map((tool) => ({
 				id: tool.name,
 				label: tool.name,
-				currentValue: matchersForTool(tool, config.keepTools).length > 0 ? "allowed" : "blocked",
+				currentValue: matchersForTool(tool, effective).length > 0 ? "allowed" : "blocked",
 				values: ["allowed", "blocked"],
 			}));
 
 			await ctx.ui.custom((tui: any, theme: any, _kb: any, done: any) => {
 				const container = new Container();
+				const MAX_NAMES = 6;
+				const nameSummary = (names: string[]) =>
+					names.length > MAX_NAMES
+						? `${names.slice(0, MAX_NAMES).join(", ")} +${names.length - MAX_NAMES} more`
+						: names.join(", ");
+				const discoveredHeader = config.autoKeepExtensions
+					? "auto-discovered (kept)"
+					: "discovered extensions (kept only if matched by keepTools)";
 				container.addChild(
 					new (class {
-						render(_width: number) {
+						render(width: number) {
+							// Truncate PLAIN text to the rendered width BEFORE styling —
+							// theme.fg() adds ANSI escapes that would break width
+							// measurement and crash pi on lines wider than the terminal.
+							const w = Number.isFinite(width) && width > 0 ? width : 80;
+							const fit = (s: string) => truncateToWidth(s, w);
 							return [
-								theme.fg("accent", theme.bold("Orchestrator keep-list")),
-								...config.keepTools.map((m) => theme.fg("dim", `  · ${m}`)),
+								theme.fg("accent", theme.bold(fit("Orchestrator keep-list"))),
+								...config.keepTools.map((m) => theme.fg("dim", fit(`  · ${m}`))),
+								...(discovered.length > 0 ? ["", theme.fg("accent", fit(discoveredHeader))] : []),
+								...discovered.map((d) => theme.fg("dim", fit(`  - ext:${d.extensionId} (${nameSummary(d.names)})`))),
 								"",
 							];
 						}

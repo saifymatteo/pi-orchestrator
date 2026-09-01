@@ -1,9 +1,14 @@
 /**
  * Fleet discovery.
  *
- * Sources, merged by name (user agents win over builtin fleet):
- *   - ~/.pi/agent/agents/*.md            (user)
+ * Sources, merged by name (later wins):
  *   - <extension dir>/agents/*.md        (builtin fleet, skippable via config.builtinFleet)
+ *   - ~/.pi/agent/agents/*.md            (user)
+ *   - <cwd>/.pi/agents + <cwd>/.agents/agents, walking cwd→ancestors
+ *                                        (project; see projectAgentDirs)
+ *
+ * So: project beats user beats builtin. Among project dirs, nearer ones win
+ * (and `.pi/agents` beats `.agents/agents` at the same level).
  *
  * Agents with `hidden: true` frontmatter are skipped.
  * config.modelOverrides[name] overrides an agent's frontmatter model.
@@ -20,16 +25,20 @@ export interface AgentConfig {
 	description: string;
 	tools?: string[];
 	model?: string;
+	/** Per-agent turn budget override (ADR-0006); positive integer or undefined. */
+	maxTurns?: number;
 	systemPrompt: string;
-	source: "user" | "builtin";
+	source: "project" | "user" | "builtin";
 	filePath: string;
 }
 
 interface AgentFrontmatter {
+	[key: string]: unknown;
 	name?: unknown;
 	description?: unknown;
 	tools?: unknown;
 	model?: unknown;
+	maxTurns?: unknown;
 	hidden?: unknown;
 }
 
@@ -42,7 +51,7 @@ function parseToolList(value: unknown): string[] | undefined {
 	return tools.length > 0 ? tools : undefined;
 }
 
-function loadAgentsFromDir(dir: string, source: "user" | "builtin"): AgentConfig[] {
+function loadAgentsFromDir(dir: string, source: AgentConfig["source"]): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 	if (!fs.existsSync(dir)) return agents;
 
@@ -74,6 +83,11 @@ function loadAgentsFromDir(dir: string, source: "user" | "builtin"): AgentConfig
 			description: frontmatter.description,
 			tools: parseToolList(frontmatter.tools),
 			model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+			// Strict positive integer: strings and other types are rejected, no coercion.
+			maxTurns:
+				typeof frontmatter.maxTurns === "number" && Number.isInteger(frontmatter.maxTurns) && frontmatter.maxTurns > 0
+					? frontmatter.maxTurns
+					: undefined,
 			systemPrompt: body,
 			source,
 			filePath,
@@ -88,15 +102,46 @@ export function builtinAgentsDir(): string {
 	return path.join(path.dirname(fileURLToPath(import.meta.url)), "agents");
 }
 
-export function discoverAgents(config: OrchestratorConfig): AgentConfig[] {
+/**
+ * Project agent directories, nearest level first. Walks cwd up through its
+ * ancestors and stops AFTER the ancestor containing `.git` (or at the
+ * filesystem root). Each level contributes `<dir>/.pi/agents` then
+ * `<dir>/.agents/agents`, in that order.
+ */
+export function projectAgentDirs(cwd: string): string[] {
+	const dirs: string[] = [];
+	let current = path.resolve(cwd);
+	for (;;) {
+		dirs.push(path.join(current, ".pi", "agents"));
+		dirs.push(path.join(current, ".agents", "agents"));
+		if (fs.existsSync(path.join(current, ".git"))) break;
+		const parent = path.dirname(current);
+		if (parent === current) break; // filesystem root
+		current = parent;
+	}
+	return dirs;
+}
+
+export function discoverAgents(config: OrchestratorConfig, cwd: string = process.cwd()): AgentConfig[] {
 	const userDir = path.join(getAgentDir(), "agents");
 
-	const userAgents = loadAgentsFromDir(userDir, "user");
 	const builtinAgents = config.builtinFleet ? loadAgentsFromDir(builtinAgentsDir(), "builtin") : [];
+	const userAgents = loadAgentsFromDir(userDir, "user");
+
+	// Merge precedence: builtin < user < project (later wins). projectAgentDirs
+	// is nearest-first with .pi/agents before .agents/agents within a level, so
+	// iterating it in REVERSE and overwriting makes nearer project dirs win and
+	// .pi/agents beat .agents/agents at the same level.
+	const projectAgents: AgentConfig[] = [];
+	const projectDirs = projectAgentDirs(cwd);
+	for (let i = projectDirs.length - 1; i >= 0; i--) {
+		projectAgents.push(...loadAgentsFromDir(projectDirs[i], "project"));
+	}
 
 	const byName = new Map<string, AgentConfig>();
 	for (const agent of builtinAgents) byName.set(agent.name, agent);
-	for (const agent of userAgents) byName.set(agent.name, agent); // user wins
+	for (const agent of userAgents) byName.set(agent.name, agent);
+	for (const agent of projectAgents) byName.set(agent.name, agent); // project wins
 
 	const agents = Array.from(byName.values());
 	for (const agent of agents) {
