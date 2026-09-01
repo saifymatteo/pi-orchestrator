@@ -24,9 +24,10 @@ Or from a cloned repo
 git clone https://github.com/saifymatteo/pi-orchestrator.git
 
 # Add this entry into your `~/.pi/agent/settings.json`
-# "packages": {
-#   "extensions": ["<path-to-your-clone>/pi-orchestrator"]
-# }
+# "packages": [
+#   # Your other packages
+#   "<path-to-your-clone>/pi-orchestrator"
+# ]
 
 # Or, quick test
 pi -e <path-to-your-clone>/pi-orchestrator/index.ts
