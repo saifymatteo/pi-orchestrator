@@ -628,6 +628,9 @@ async function runSingleAgent(
 	stallTimeoutMs: number,
 	blockedTools: string[],
 	extensions: string[],
+	/** Parent's pre-policy system prompt to append (config
+	 *  `forwardParentPrompt`); undefined disables the append. */
+	parentPrompt: string | undefined,
 	/** Parent-side tool list for expanding blockedTools to concrete names at
 	 *  spawn time (tools may register after registration — resolved fresh per
 	 *  spawn). */
@@ -711,11 +714,15 @@ async function runSingleAgent(
 
 	try {
 		// System prompt + tool-policy hint (ADR-0007): the child must know
-		// blocked tools fail before it tries them. The hint is appended to the
-		// combined string so the empty-trim guard below covers both parts — an
-		// empty prompt with no blocked tools writes nothing.
+		// blocked tools fail before it tries them. The forwarded parent prompt
+		// (config `forwardParentPrompt`) carries the parent's pre-policy system
+		// prompt — including installed extensions' promptGuidelines — into the
+		// child. All parts are appended to the combined string so the empty-trim
+		// guard below covers them — an empty prompt with no forwarded prompt and
+		// no blocked tools writes nothing.
 		const sysPrompt =
 			agent.systemPrompt +
+			(parentPrompt ? `\n\n${parentPrompt}` : "") +
 			(blockedTools.length
 				? `\n\n# Tool policy\nThese tools are blocked by orchestrator policy and will fail if called: ${blockedTools.join(", ")}. Accomplish the task with the remaining tools.`
 				: "");
@@ -1041,6 +1048,13 @@ export interface DelegateDeps {
 	 *  child via pi's repeatable `-e` flag; non-empty also spawns children with
 	 *  `--no-extensions` (ADR-0008). Falls back to inherit-all. */
 	getChildExtensions?: () => string[];
+	/** Whether to append the parent's system prompt to every subagent's
+	 *  system prompt (orchestrator.json `forwardParentPrompt`). Falls back
+	 *  to false (no forwarding). */
+	getForwardParentPrompt?: () => boolean;
+	/** The parent's pre-policy system prompt, captured per turn by the
+	 *  before_agent_start hook. Undefined until captured (or in child mode). */
+	getParentPrompt?: () => string | undefined;
 }
 
 export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
@@ -1074,6 +1088,9 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 			// per-agent override — extension loading is a fleet-wide concern, not
 			// an agent-frontmatter one. Non-empty ⇒ --no-extensions + -e entries.
 			const extensions = deps.getChildExtensions?.() ?? [];
+			// Parent prompt forwarding: only when enabled in config; undefined when
+			// off or not yet captured (child mode / first turn) — nothing appended.
+			const parentPrompt = deps.getForwardParentPrompt?.() ? deps.getParentPrompt?.() : undefined;
 			const makeDetails =
 				(mode: "single" | "parallel" | "chain") =>
 				(results: SingleResult[]): SubagentDetails => ({ mode, results });
@@ -1140,6 +1157,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 							stallTimeoutMs,
 							resolveBlockedTools(step.agent),
 							extensions,
+							parentPrompt,
 							() => pi.getAllTools(),
 							step.cwd,
 							i + 1,
@@ -1220,6 +1238,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 								stallTimeoutMs,
 								resolveBlockedTools(t.agent),
 								extensions,
+								parentPrompt,
 								() => pi.getAllTools(),
 								t.cwd,
 								undefined,
@@ -1268,6 +1287,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						stallTimeoutMs,
 						resolveBlockedTools(params.agent),
 						extensions,
+						parentPrompt,
 						() => pi.getAllTools(),
 						params.cwd,
 						undefined,

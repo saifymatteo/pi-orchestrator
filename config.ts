@@ -39,6 +39,10 @@ export interface OrchestratorConfig {
 	 *  with `--no-extensions` plus one `-e` per entry (selective loading);
 	 *  empty lets children inherit every discovered extension (ADR-0005). */
 	childExtensions: string[];
+	/** Append the orchestrator parent's system prompt (pre-policy; includes
+	 *  installed extensions' promptGuidelines, e.g. CodeGraph usage) to every
+	 *  subagent's system prompt. Default true. */
+	forwardParentPrompt: boolean;
 	/** Include the fleet shipped with the extension (user agents always win by name). */
 	builtinFleet: boolean;
 	/** Per-agent model overrides, e.g. { "scout": "openrouter/some-cheap-model" }. */
@@ -56,6 +60,7 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
 	keepTools: ["delegate"],
 	childBlockedTools: [],
 	childExtensions: [],
+	forwardParentPrompt: true,
 	builtinFleet: true,
 	modelOverrides: {},
 	maxTurns: 50,
@@ -81,6 +86,10 @@ export function loadConfig(): OrchestratorConfig {
 			childExtensions: Array.isArray(raw.childExtensions)
 				? raw.childExtensions.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
 				: DEFAULT_CONFIG.childExtensions,
+			forwardParentPrompt:
+				typeof raw.forwardParentPrompt === "boolean"
+					? raw.forwardParentPrompt
+					: DEFAULT_CONFIG.forwardParentPrompt,
 			builtinFleet: typeof raw.builtinFleet === "boolean" ? raw.builtinFleet : DEFAULT_CONFIG.builtinFleet,
 			modelOverrides:
 				raw.modelOverrides && typeof raw.modelOverrides === "object" && !Array.isArray(raw.modelOverrides)
@@ -97,6 +106,7 @@ export function loadConfig(): OrchestratorConfig {
 			keepTools: [...DEFAULT_CONFIG.keepTools],
 			childBlockedTools: [...DEFAULT_CONFIG.childBlockedTools],
 			childExtensions: [...DEFAULT_CONFIG.childExtensions],
+			forwardParentPrompt: DEFAULT_CONFIG.forwardParentPrompt,
 			modelOverrides: {},
 			maxTurns: DEFAULT_CONFIG.maxTurns,
 		};

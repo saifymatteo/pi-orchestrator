@@ -75,6 +75,7 @@ test("loadConfig: missing file yields full defaults", () => {
 			keepTools: ["delegate"],
 			childBlockedTools: [],
 			childExtensions: [],
+			forwardParentPrompt: true,
 			builtinFleet: true,
 			modelOverrides: {},
 			maxTurns: 50,
@@ -118,6 +119,29 @@ test("loadConfig: childExtensions missing or non-array falls back to []", () => 
 	});
 	withConfigFile({ childExtensions: "./my-ext.ts" }, () => {
 		assert.deepEqual(loadConfig().childExtensions, []);
+	});
+});
+
+// ── forwardParentPrompt (parent system prompt forwarding) ─────────────────
+
+test("loadConfig: forwardParentPrompt missing falls back to true", () => {
+	withConfigFile({}, () => {
+		assert.equal(loadConfig().forwardParentPrompt, true);
+	});
+	withConfigFile(null, () => {
+		assert.equal(loadConfig().forwardParentPrompt, true);
+	});
+});
+
+test("loadConfig: forwardParentPrompt explicit false is respected", () => {
+	withConfigFile({ forwardParentPrompt: false }, () => {
+		assert.equal(loadConfig().forwardParentPrompt, false);
+	});
+});
+
+test("loadConfig: forwardParentPrompt non-boolean ('yes') falls back to true", () => {
+	withConfigFile({ forwardParentPrompt: "yes" }, () => {
+		assert.equal(loadConfig().forwardParentPrompt, true);
 	});
 });
 

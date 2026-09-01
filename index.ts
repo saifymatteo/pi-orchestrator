@@ -104,6 +104,14 @@ function installChildWatchdog(): void {
 // ── Parent mode ─────────────────────────────────────────────────────────────
 
 /**
+ * The orchestrator parent's pre-policy system prompt, captured each turn by
+ * the before_agent_start hook. Forwarded to subagents (when
+ * config.forwardParentPrompt is on) so installed extensions' promptGuidelines
+ * (e.g. CodeGraph usage) reach the children too.
+ */
+let parentSystemPrompt: string | undefined;
+
+/**
  * Deps for the delegate tool. Takes a live config getter (session_start
  * reassigns `config` from disk) so every dep reads the current values, never
  * a stale copy. Exported for unit tests (tests/index.test.ts).
@@ -125,6 +133,11 @@ export function buildDelegateDeps(getConfig: () => OrchestratorConfig, onIdle: (
 		// Child extension loading (ADR-0008): empty = inherit-all, non-empty =
 		// --no-extensions + one -e per entry (derived inside delegate.ts).
 		getChildExtensions: () => getConfig().childExtensions,
+		// Forward the parent's captured pre-policy system prompt to subagents
+		// (config forwardParentPrompt); parentSystemPrompt is captured per turn
+		// by the before_agent_start hook below.
+		getForwardParentPrompt: () => getConfig().forwardParentPrompt,
+		getParentPrompt: () => parentSystemPrompt,
 		onIdle,
 	};
 }
@@ -203,6 +216,7 @@ export default function (pi: any) {
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		config = loadConfig();
+		parentSystemPrompt = undefined; // Defensive: don't forward a stale prompt across sessions
 		engaged = config.enabled;
 		if (ctx?.ui) lastUi = ctx.ui;
 
@@ -229,6 +243,9 @@ export default function (pi: any) {
 
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
 		if (!engaged) return;
+		// Capture the parent's real (pre-policy) prompt each turn, before the
+		// policy append below, for forwarding to subagents (forwardParentPrompt).
+		parentSystemPrompt = event.systemPrompt;
 		if (ctx?.ui) lastUi = ctx.ui;
 
 		// Re-apply the reduction: catches tools registered after session_start

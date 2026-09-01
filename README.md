@@ -58,6 +58,7 @@ Child success is state-based (the RPC `agent_settled` event); child exit codes a
   "keepTools": ["delegate"],
   "childBlockedTools": [],
   "childExtensions": [],
+  "forwardParentPrompt": true,
   "builtinFleet": true,
   "modelOverrides": {},
   "maxTurns": 50,
@@ -108,6 +109,10 @@ Extension sources loaded in every child, with derived semantics (ADR-0008):
 - **Non-empty** — children spawn with pi's `--no-extensions` flag (no global extensions load at all) and load only these entries via pi's repeatable `-e`/`--extension` flag (a path, npm, or git source).
 
 Note: to keep the child-side tool gate and orphan watchdog alive in isolated children, add this package's entry via `childExtensions` (e.g. `["npm:@saifymatteo/pi-orchestrator"]`) — otherwise nothing loads child-side, this extension included. See [Child extension control](#child-extension-control) for the motivating case.
+
+### `forwardParentPrompt` (boolean, default `true`)
+
+When `true`, every subagent's system prompt gets the orchestrator parent's pre-policy system prompt appended (after the agent's own body, before the `# Tool policy` hint). This carries installed extensions' promptGuidelines — e.g. CodeGraph's tool usage guidance, which is injected into the parent's prompt — into subagents, so they use those tools effectively. Set to `false` to keep subagent prompts minimal (agent body + tool-policy hint only).
 
 ### `builtinFleet` (boolean, default `true`)
 

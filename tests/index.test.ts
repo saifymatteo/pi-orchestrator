@@ -95,6 +95,27 @@ test("buildDelegateDeps: getChildExtensions reads the live config (session_start
 	assert.deepEqual(deps.getChildExtensions?.(), ["./my-ext.ts"]);
 });
 
+// ── Delegate deps wiring: parent prompt forwarding (forwardParentPrompt) ──
+
+test("buildDelegateDeps: getForwardParentPrompt returns the config value", () => {
+	const config: OrchestratorConfig = { ...DEFAULT_CONFIG, forwardParentPrompt: false };
+	const deps = buildDelegateDeps(() => config, () => {});
+	assert.equal(deps.getForwardParentPrompt?.(), false);
+});
+
+test("buildDelegateDeps: getForwardParentPrompt reads the live config (session_start reload), not a stale copy", () => {
+	let config: OrchestratorConfig = { ...DEFAULT_CONFIG, forwardParentPrompt: true };
+	const deps = buildDelegateDeps(() => config, () => {});
+	assert.equal(deps.getForwardParentPrompt?.(), true);
+	config = { ...config, forwardParentPrompt: false };
+	assert.equal(deps.getForwardParentPrompt?.(), false);
+});
+
+test("buildDelegateDeps: getParentPrompt returns undefined by default (no capture yet)", () => {
+	const deps = buildDelegateDeps(() => DEFAULT_CONFIG, () => {});
+	assert.equal(deps.getParentPrompt?.(), undefined);
+});
+
 // ── Child tool gate (ADR-0007) ─────────────────────────────────────────────
 
 test("installChildToolGate: matching tool_call returns block with the matcher in the reason", async () => {
