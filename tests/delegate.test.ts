@@ -11,6 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { idleFleetWidgetLines, renderFleetLines } from "../delegate.ts";
+import { fleetKey, nextFleetRunId } from "../delegate.ts";
 
 /** Minimal RunningTask-shaped fixture (mode is the only new required field). */
 function task(overrides = {}) {
@@ -198,3 +199,31 @@ test("renderResult single genuine failure (error stopReason, not partial): red �
 	assert.ok(text.includes("Error: boom"), `expected error message: ${text}`);
 	assert.ok(!text.includes("⏳") && !text.includes("✓"), `unexpected icons: ${text}`);
 });
+
+// ── Unique fleet keys (concurrent delegate invocations) ────────────────────
+
+test("nextFleetRunId successive calls differ", () => {
+	const a = nextFleetRunId();
+	const b = nextFleetRunId();
+	assert.notEqual(a, b);
+	assert.ok(b > a);
+});
+
+test("fleetKey is distinct for two simulated concurrent invocations of every mode", () => {
+	// Two delegate calls at the same "time": same mode/index, different run ids.
+	for (const [modeA, modeB] of [
+		["single", "single"],
+		["parallel", "parallel"],
+		["chain", "chain"],
+	] as const) {
+		const runA = nextFleetRunId();
+		const runB = nextFleetRunId();
+		assert.notEqual(fleetKey(runA, modeA, 0), fleetKey(runB, modeB, 0), `mode ${modeA} collides`);
+	}
+});
+
+test("renderFleetLines with two single-mode tasks shows 2 running", () => {
+	const lines = renderFleetLines([task({ agent: "scout" }), task({ agent: "worker", turns: 2 })], ["scout", "worker"]);
+	assert.equal(lines[0], "⏳ Fleet · single · 2 running");
+});
+

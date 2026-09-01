@@ -70,6 +70,25 @@ interface RunningTask {
 
 const runningTasks = new Map<string, RunningTask>();
 
+/** True while at least one subagent process is running (fleet-widget guard). */
+export function hasRunningTasks(): boolean {
+	return runningTasks.size > 0;
+}
+
+/** Monotonic sequence distinguishing concurrent delegate invocations. */
+let fleetRunSeq = 0;
+
+/** Next unique per-invocation run id (incremented on every delegate call). */
+export function nextFleetRunId(): number {
+	return ++fleetRunSeq;
+}
+
+/** Unique runningTasks key for a delegate invocation (mode + run id). */
+export function fleetKey(runId: number, mode: "single" | "parallel" | "chain", index?: number): string {
+	if (mode === "single") return `single:${runId}`;
+	return mode === "parallel" ? `task${runId}:${index}` : `chain${runId}:${index}`;
+}
+
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -904,6 +923,9 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 				(results: SingleResult[]): SubagentDetails => ({ mode, results });
 
 			const fleetChanged = () => updateFleetWidget(ctx, agents.map((a) => a.name));
+			// Unique per invocation: concurrent delegate calls must not collide on
+			// runningTasks keys, or the fleet header undercounts running agents.
+			const runId = nextFleetRunId();
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -947,7 +969,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 
 						const result = await runSingleAgent(
 							deps.getCwd(),
-							`chain${i}`,
+							fleetKey(runId, "chain", i),
 							dispatchDefaults,
 							agents,
 							step.agent,
@@ -1018,7 +1040,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						async (t, index) => {
 							const result = await runSingleAgent(
 								deps.getCwd(),
-								`task${index}`,
+								fleetKey(runId, "parallel", index),
 								dispatchDefaults,
 								agents,
 								t.agent,
@@ -1063,7 +1085,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 				if (params.agent && params.task) {
 					const result = await runSingleAgent(
 						deps.getCwd(),
-						`single`,
+						fleetKey(runId, "single"),
 						dispatchDefaults,
 						agents,
 						params.agent,

@@ -26,7 +26,7 @@ import {
 	type DiscoveredTool,
 	type OrchestratorConfig,
 } from "./config.ts";
-import { clearFleetWidget, idleFleetWidgetLines, killAllFleet, registerDelegateTool } from "./delegate.ts";
+import { clearFleetWidget, hasRunningTasks, idleFleetWidgetLines, killAllFleet, registerDelegateTool } from "./delegate.ts";
 import { buildPolicy } from "./policy.ts";
 import { truncateToWidth } from "./width.ts";
 import type { AgentConfig } from "./agents.ts";
@@ -76,6 +76,10 @@ export default function (pi: any) {
 
 	function updateIdleWidget(): void {
 		if (!lastUi?.setWidget) return;
+		// Clobber guard: never repaint the (idle) fleet widget while a subagent
+		// is running. onIdle only fires when runningTasks is empty, so idle is
+		// never wrongly suppressed — this only defuses stale/extra callers.
+		if (hasRunningTasks()) return;
 		try {
 			if (engaged) {
 				lastUi.setWidget("orchestrator-fleet", idleFleetWidgetLines(discoverAgents(config).map((a) => a.name)));
