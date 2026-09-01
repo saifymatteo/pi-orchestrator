@@ -16,6 +16,20 @@ pi install npm:@saifymatteo/pi-orchestrator
 pi install git:github.com/saifymatteo/pi-orchestrator
 ```
 
+Or from a cloned repo
+
+```bash
+git clone https://github.com/saifymatteo/pi-orchestrator.git
+
+# Add this entry into your `~/.pi/agent/settings.json`
+# "packages": {
+#   "extensions": ["<path-to-your-clone>/pi-orchestrator"]
+# }
+
+# Or, quick test
+pi -e <path-to-your-clone>/pi-orchestrator/index.ts
+```
+
 ## How it works
 
 | Layer | Mechanism |
