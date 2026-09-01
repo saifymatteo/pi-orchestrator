@@ -43,7 +43,6 @@ Child success is state-based (the RPC `agent_settled` event); child exit codes a
   "childBlockedTools": [],
   "childExtensions": [],
   "builtinFleet": true,
-  "autoKeepExtensions": false,
   "modelOverrides": {},
   "maxTurns": 50,
   "stallTimeoutMs": 600000
@@ -64,13 +63,11 @@ Matchers for tools the orchestrator keeps while engaged. Matcher semantics (all 
 
 `delegate` is always kept, with or without a matcher.
 
-By default the effective keep-list is exactly your config matchers plus `delegate` — keep-list-only. Non-builtin packages are still discovered at runtime and shown in `/orchestrator-tools` (read-only), but their tools are NOT available to the orchestrator unless a matcher above names them (ADR-0004). Discovery covers non-builtin packages only — pi's core tools stay excluded unless a matcher names them. The derived information is never persisted; only your config matchers are written back to `orchestrator.json`. Existing config entries with old `ext:` ids remain valid — they simply match nothing while that package is absent, and match again if it returns.
+**Empty vs non-empty `keepTools` (derived rule, ADR-0004):** an **empty** `keepTools` list auto-keeps every discovered non-builtin extension — each contributes an `ext:<id>` matcher to the effective keep-list each turn, so its tools stay available without config entries; extensions that re-register a builtin tool name still only contribute their non-colliding tools, kept by exact name (see below). A **non-empty** `keepTools` list is an exact allowlist — only the matching tools stay, plus `delegate`. The default `"keepTools": ["delegate"]` is therefore keep-list-only.
+
+By default the effective keep-list is exactly your config matchers plus `delegate` — keep-list-only. Non-builtin packages are still discovered at runtime and shown in `/orchestrator-tools` (read-only), but their tools are NOT available to the orchestrator unless a matcher above names them or `keepTools` is empty (ADR-0004). Discovery covers non-builtin packages only — pi's core tools stay excluded unless a matcher names them. The derived information is never persisted; only your config matchers are written back to `orchestrator.json`. Existing config entries with old `ext:` ids remain valid — they simply match nothing while that package is absent, and match again if it returns.
 
 **Builtin-shadowing exclusions:** extensions that re-register a builtin tool name (`read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`) are excluded from discovery unless explicitly listed as `ext:<id>` in keepTools. Registration replaces the builtin wholesale, so keeping the shadow would silently resurrect a core tool the config never listed; an explicit `ext:<id>` entry re-enables the whole extension.
-
-### `autoKeepExtensions` (boolean, default `false`)
-
-Opt back into the original ADR-0004 auto-keep behavior: every discovered non-builtin extension contributes an `ext:<id>` matcher to the effective keep-list each turn, so its tools stay available without config entries. Builtin-shadowing extensions stay excluded unless explicitly listed as `ext:<id>` (see above). With the default `false`, nothing is auto-kept — the keep-list alone decides (ADR-0004).
 
 ### `childBlockedTools` (string[], default `[]`)
 

@@ -76,7 +76,6 @@ test("loadConfig: missing file yields full defaults", () => {
 			childBlockedTools: [],
 			childExtensions: [],
 			builtinFleet: true,
-			autoKeepExtensions: false,
 			modelOverrides: {},
 			maxTurns: 50,
 			stallTimeoutMs: 600000,
@@ -84,22 +83,12 @@ test("loadConfig: missing file yields full defaults", () => {
 	});
 });
 
-test("loadConfig: autoKeepExtensions accepts booleans only, defaults false", () => {
-	withConfigFile({ autoKeepExtensions: true }, () => {
-		assert.equal(loadConfig().autoKeepExtensions, true);
-	});
-	for (const bad of ["true", 1, null]) {
-		withConfigFile({ autoKeepExtensions: bad }, () => {
-			assert.equal(loadConfig().autoKeepExtensions, false, `autoKeepExtensions=${JSON.stringify(bad)} must fall back to false`);
-		});
-	}
-});
-
 test("loadConfig: keepTools drops non-string/blank entries", () => {
 	withConfigFile({ keepTools: ["todo", "", 42, "  ", "hindsight_*"] }, () => {
 		assert.deepEqual(loadConfig().keepTools, ["todo", "hindsight_*"]);
 	});
 });
+
 test("loadConfig: childBlockedTools keeps valid matchers and drops non-string/blank entries", () => {
 	withConfigFile({ childBlockedTools: ["bash", "hindsight_*", "", 42, "  ", "ext:@l/p"] }, () => {
 		assert.deepEqual(loadConfig().childBlockedTools, ["bash", "hindsight_*", "ext:@l/p"]);
@@ -161,7 +150,6 @@ test("toolMatchesAnyMatcher: returns the first matching matcher", () => {
 	assert.equal(toolMatchesAnyMatcher(t, ["nope", "hindsight_*", "ext:@l/pi-hindsight"]), "hindsight_*");
 	assert.equal(toolMatchesAnyMatcher(t, ["nope", "HINDSIGHT_RECALL", "hindsight_*"]), "HINDSIGHT_RECALL");
 });
-
 
 // ── discoverKeptTools ───────────────────────────────────────────────────────
 
@@ -244,9 +232,9 @@ test("discoverKeptTools: builtin-shadow exclusion is case-insensitive on tool na
 	assert.deepEqual(discovered, []);
 });
 
-// ── effectiveKeepTools (keep-list-only default; autoKeepExtensions opt-in) ─
+// ── effectiveKeepTools (empty keepTools = auto-keep; non-empty = keep-list-only) ─
 
-test("effectiveKeepTools: default is keep-list-only — discovered extensions are filtered out", () => {
+test("effectiveKeepTools: non-empty keepTools is keep-list-only — discovered extensions are filtered out", () => {
 	const config = ["delegate", " ext:@s/p ", "todo"];
 	const discovered = [
 		{ extensionId: "@s/p", names: ["a"], partial: false },
@@ -259,16 +247,16 @@ test("effectiveKeepTools: default is keep-list-only — discovered extensions ar
 	assert.deepEqual(config, ["delegate", " ext:@s/p ", "todo"]);
 });
 
-test("effectiveKeepTools: autoKeepExtensions=true restores ADR-0004 auto-keep", () => {
-	const config = ["delegate", " ext:@s/p ", "todo"];
+test("effectiveKeepTools: empty keepTools auto-keeps every discovered extension (ADR-0004)", () => {
 	const discovered = [
 		{ extensionId: "@s/p", names: ["a"], partial: false },
 		{ extensionId: "q", names: ["b"], partial: false },
 	];
-	assert.deepEqual(effectiveKeepTools(config, discovered, true), ["delegate", "ext:@s/p", "todo", "ext:q"]);
+	assert.deepEqual(effectiveKeepTools([], discovered), ["ext:@s/p", "ext:q"]);
+	assert.deepEqual(effectiveKeepTools([], []), []);
 });
 
-test("effectiveKeepTools: ext: matcher still keeps explicitly-listed extensions under the default", () => {
+test("effectiveKeepTools: ext: matcher keeps explicitly-listed extensions under keep-list-only", () => {
 	const config = ["ext:@l/p"];
 	const discovered = [
 		{ extensionId: "@l/p", names: ["x"], partial: false },
@@ -290,16 +278,13 @@ function fffTools() {
 	return [tool("grep", nm(FFF, "src/index.ts")), tool("ffgrep", nm(FFF, "src/index.ts"))];
 }
 
-test("effectiveKeepTools: default filters partial groups; flag emits per-name matchers, not ext:<id>", () => {
+test("effectiveKeepTools: empty keepTools emits per-name matchers for partial groups, not ext:<id>", () => {
 	// "grep" is shadow-skipped; only "ffgrep" survives in the group → partial.
 	const discovered = discoverKeptTools(fffTools(), []);
 	assert.deepEqual(discovered, [{ extensionId: FFF, names: ["ffgrep"], partial: true }]);
 
-	// Default (keep-list-only): the partial extension contributes nothing.
-	assert.deepEqual(effectiveKeepTools([], discovered), []);
-
-	// Opt-in auto-keep: sibling kept by exact name, shadowed builtin not re-kept.
-	const effective = effectiveKeepTools([], discovered, true);
+	// Empty keepTools (auto-keep): sibling kept by exact name, shadowed builtin not re-kept.
+	const effective = effectiveKeepTools([], discovered);
 	assert.ok(effective.includes("ffgrep"), "sibling must be kept by exact name");
 	assert.ok(!effective.includes(`ext:${FFF}`), "ext:<id> must NOT be emitted (would re-keep grep)");
 	assert.ok(!effective.includes("grep"), "shadowed builtin name must not be re-kept");
@@ -315,21 +300,21 @@ test("effectiveKeepTools: explicit ext:<id> config entry keeps the whole partial
 	assert.ok(effective.includes(`ext:${FFF}`), "whole extension kept via ext:<id>");
 });
 
-test("effectiveKeepTools: default does not auto-keep clean extensions; flag emits ext:<id>", () => {
+test("effectiveKeepTools: keep-list-only filters clean extensions; empty keepTools emits ext:<id>", () => {
 	const discovered = discoverKeptTools([tool("hindsight_recall", nm("@l/pi-hindsight", "i.js"))], []);
 	assert.deepEqual(discovered, [{ extensionId: "@l/pi-hindsight", names: ["hindsight_recall"], partial: false }]);
-	assert.deepEqual(effectiveKeepTools([], discovered), [], "keep-list-only: nothing added");
-	assert.deepEqual(effectiveKeepTools([], discovered, true), ["ext:@l/pi-hindsight"]);
+	assert.deepEqual(effectiveKeepTools(["delegate"], discovered), ["delegate"], "keep-list-only: nothing added");
+	assert.deepEqual(effectiveKeepTools([], discovered), ["ext:@l/pi-hindsight"]);
 });
 
-test("partial group end-to-end (default keep-list-only): both grep and ffgrep blocked without config", () => {
-	const effective = effectiveKeepTools([], discoverKeptTools(fffTools(), []));
+test("partial group end-to-end (keep-list-only): both grep and ffgrep blocked without a matching matcher", () => {
+	const effective = effectiveKeepTools(["delegate"], discoverKeptTools(fffTools(), []));
 	assert.equal(toolIsKept(tool("grep", nm(FFF, "src/index.ts")), effective), false, "shadowed grep blocked");
-	assert.equal(toolIsKept(tool("ffgrep", nm(FFF, "src/index.ts")), effective), false, "sibling not auto-kept by default");
+	assert.equal(toolIsKept(tool("ffgrep", nm(FFF, "src/index.ts")), effective), false, "sibling not kept without a matcher");
 });
 
-test("partial group end-to-end (autoKeepExtensions): toolIsKept blocks shadowed grep, allows ffgrep", () => {
-	const effective = effectiveKeepTools([], discoverKeptTools(fffTools(), []), true);
+test("partial group end-to-end (empty keepTools auto-keep): toolIsKept blocks shadowed grep, allows ffgrep", () => {
+	const effective = effectiveKeepTools([], discoverKeptTools(fffTools(), []));
 	assert.equal(toolIsKept(tool("grep", nm(FFF, "src/index.ts")), effective), false, "shadowed grep blocked");
 	assert.equal(toolIsKept(tool("ffgrep", nm(FFF, "src/index.ts")), effective), true, "sibling ffgrep kept");
 });

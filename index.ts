@@ -14,8 +14,6 @@
  * set PI_ORCHESTRATOR_BLOCKED_TOOLS (gate-only child mode).
  */
 
- */
-
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
 import { discoverAgents } from "./agents.ts";
@@ -167,7 +165,7 @@ export default function (pi: any) {
 			const all: any[] = pi.getAllTools();
 			discovered = discoverKeptTools(all, config.keepTools);
 			if (engaged) {
-				const effective = effectiveKeepTools(config.keepTools, discovered, config.autoKeepExtensions);
+				const effective = effectiveKeepTools(config.keepTools, discovered);
 				const kept = all.filter((t) => toolIsKept(t, effective)).map((t) => t.name);
 				pi.setActiveTools(Array.from(new Set([...kept, "delegate"])));
 			} else {
@@ -239,9 +237,9 @@ export default function (pi: any) {
 
 		const agents: AgentConfig[] = discoverAgents(config);
 		// Policy text must only advertise tools the gate actually allows: under
-		// keep-list-only (autoKeepExtensions:false) most discovered extensions
+		// keep-list-only (non-empty keepTools) most discovered extensions
 		// are not kept, so filter the discovered groups down to the kept tools.
-		const effective = effectiveKeepTools(config.keepTools, discovered, config.autoKeepExtensions);
+		const effective = effectiveKeepTools(config.keepTools, discovered);
 		const keptDiscovered = discovered
 			.map((d) => ({
 				...d,
@@ -260,7 +258,7 @@ export default function (pi: any) {
 		if (event.toolName === "delegate") return;
 
 		const tool = pi.getAllTools().find((t: any) => t.name === event.toolName);
-		const effective = effectiveKeepTools(config.keepTools, discovered, config.autoKeepExtensions);
+		const effective = effectiveKeepTools(config.keepTools, discovered);
 		const allowed = toolIsKept({ name: event.toolName, sourceInfo: tool?.sourceInfo }, effective);
 		if (allowed) return;
 
@@ -299,7 +297,7 @@ export default function (pi: any) {
 			}
 
 			const allTools: any[] = pi.getAllTools();
-			const effective = effectiveKeepTools(config.keepTools, discovered, config.autoKeepExtensions);
+			const effective = effectiveKeepTools(config.keepTools, discovered);
 			const items: SettingItem[] = allTools.map((tool) => ({
 				id: tool.name,
 				label: tool.name,
@@ -314,8 +312,8 @@ export default function (pi: any) {
 					names.length > MAX_NAMES
 						? `${names.slice(0, MAX_NAMES).join(", ")} +${names.length - MAX_NAMES} more`
 						: names.join(", ");
-				const discoveredHeader = config.autoKeepExtensions
-					? "auto-discovered (kept)"
+				const discoveredHeader = config.keepTools.length === 0
+					? "discovered extensions (auto-kept — keepTools is empty)"
 					: "discovered extensions (kept only if matched by keepTools)";
 				container.addChild(
 					new (class {

@@ -10,13 +10,14 @@
  *
  * "delegate" is always kept regardless of config (the gate never blocks it).
  *
- * The effective keep-list is exactly the config matchers plus `delegate`
- * (added by the caller) — keep-list-only. `discoverKeptTools` still discovers
- * non-builtin tools at runtime for the /orchestrator-tools display and the
- * policy text, but they are NOT kept unless matched by keepTools — unless
- * `autoKeepExtensions: true` restores the old ADR-0004 auto-keep behavior
- * (extensions that re-register builtin tool names stay excluded from that
- * auto-keep unless explicitly listed as `ext:<id>` in keepTools).
+ * The effective keep-list is derived from keepTools (see effectiveKeepTools):
+ * non-empty keepTools is keep-list-only — exactly the config matchers plus
+ * `delegate` (added by the caller); empty keepTools auto-keeps every
+ * discovered non-builtin extension (old ADR-0004 behavior; extensions that
+ * re-register builtin tool names stay excluded from that auto-keep unless
+ * explicitly listed as `ext:<id>` in keepTools). `discoverKeptTools` still
+ * discovers non-builtin tools at runtime for the /orchestrator-tools display
+ * and the policy text.
  */
 
 import * as fs from "node:fs";
@@ -42,12 +43,6 @@ export interface OrchestratorConfig {
 	builtinFleet: boolean;
 	/** Per-agent model overrides, e.g. { "scout": "openrouter/some-cheap-model" }. */
 	modelOverrides: Record<string, string>;
-	/** When true, every discovered non-builtin extension is auto-kept (old
-	 *  ADR-0004 behavior, minus builtin-shadowing extensions — see
-	 *  discoverKeptTools). Default false: keep-list only — discovered
-	 *  extensions are shown in /orchestrator-tools but not kept unless
-	 *  matched by keepTools. */
-	autoKeepExtensions: boolean;
 	/** Turn budget for subagents (ADR-0006). Must be a positive integer. */
 	maxTurns: number;
 	/** Wall-clock stall timeout for subagents in ms (ADR-0006). Any stdout
@@ -62,7 +57,6 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
 	childBlockedTools: [],
 	childExtensions: [],
 	builtinFleet: true,
-	autoKeepExtensions: false,
 	modelOverrides: {},
 	maxTurns: 50,
 	stallTimeoutMs: 600_000,
@@ -88,8 +82,6 @@ export function loadConfig(): OrchestratorConfig {
 				? raw.childExtensions.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
 				: DEFAULT_CONFIG.childExtensions,
 			builtinFleet: typeof raw.builtinFleet === "boolean" ? raw.builtinFleet : DEFAULT_CONFIG.builtinFleet,
-			autoKeepExtensions:
-				typeof raw.autoKeepExtensions === "boolean" ? raw.autoKeepExtensions : DEFAULT_CONFIG.autoKeepExtensions,
 			modelOverrides:
 				raw.modelOverrides && typeof raw.modelOverrides === "object" && !Array.isArray(raw.modelOverrides)
 					? Object.fromEntries(
@@ -189,6 +181,7 @@ function matcherMatches(matcher: string, toolName: string, extensionId: string):
 	if (m.includes("*") || m.includes("?")) return globToRegex(m).test(toolName);
 	return toolName.toLowerCase() === m;
 }
+
 /**
  * First matcher that matches the tool (exact, glob, ext:<id>), or undefined.
  * Thin wrapper over matcherMatches/deriveExtensionId — same semantics as
@@ -201,7 +194,6 @@ export function toolMatchesAnyMatcher(
 	const extensionId = deriveExtensionId(tool as { name: string; sourceInfo?: { path?: string; source?: string } });
 	return matchers.find((matcher) => matcherMatches(matcher, tool.name, extensionId));
 }
-
 
 /**
  * True when a tool stays available to the orchestrator.
@@ -284,35 +276,31 @@ export function discoverKeptTools(
 }
 
 /**
- * The effective keep-list. By default (autoKeepExtensions=false) it is
- * exactly the config matchers (deduped) — keep-list-only. With
- * autoKeepExtensions=true, an `ext:<id>` matcher is added for every
- * fully-kept discovered extension (ADR-0004 auto-keep). A *partial*
- * extension — one of whose tools was builtin-shadow-skipped (see
- * discoverKeptTools) — instead gets one exact per-name matcher for each
- * surviving tool, so the siblings are kept without the `ext:<id>` matcher
- * re-keeping the shadowed builtin. An explicit `ext:<id>` config entry
- * always wins: the whole extension is kept and the partial splitting is
- * skipped for it. Derived per turn — never persisted; only
+ * The effective keep-list, derived from `configKeepTools` emptiness:
+ *   - Empty (no matchers) ⇒ auto-keep (old ADR-0004 behavior): an `ext:<id>`
+ *     matcher is added for every fully-kept discovered extension. A *partial*
+ *     extension — one of whose tools was builtin-shadow-skipped (see
+ *     discoverKeptTools) — instead gets one exact per-name matcher for each
+ *     surviving tool, so the siblings are kept without the `ext:<id>` matcher
+ *     re-keeping the shadowed builtin. (With an empty list there are no
+ *     explicit `ext:<id>` config entries, so no explicit-wins precedence
+ *     applies.)
+ *   - Non-empty ⇒ keep-list-only: exactly the config matchers (deduped);
+ *     discovered extensions contribute nothing. An explicit `ext:<id>`
+ *     config entry keeps the whole extension, partial or not.
+ * DEFAULT_CONFIG.keepTools is ["delegate"] (non-empty), so the out-of-the-box
+ * behavior is keep-list-only. Derived per turn — never persisted; only
  * `config.keepTools` is written back to orchestrator.json.
  */
-export function effectiveKeepTools(
-	configKeepTools: string[],
-	discovered: DiscoveredTool[],
-	autoKeepExtensions: boolean = false,
-): string[] {
+export function effectiveKeepTools(configKeepTools: string[], discovered: DiscoveredTool[]): string[] {
 	const matchers = new Set<string>();
 	for (const matcher of configKeepTools) {
 		const trimmed = matcher.trim();
 		if (trimmed) matchers.add(trimmed);
 	}
-	if (!autoKeepExtensions) return Array.from(matchers);
+	if (matchers.size > 0) return Array.from(matchers);
 	for (const d of discovered) {
-		// Defense-in-depth: discoverKeptTools never shadow-skips an extension
-		// that config explicitly opts in via `ext:<id>`, but effectiveKeepTools
-		// is a pure function callable with arbitrary inputs.
-		const explicitlyKept = configKeepTools.some((m) => extMatcherMatches(m, d.extensionId));
-		if (!explicitlyKept && d.partial) {
+		if (d.partial) {
 			for (const name of d.names) matchers.add(name);
 		} else {
 			matchers.add(`ext:${d.extensionId}`);

@@ -20,7 +20,7 @@ The single tool the Orchestrator uses to hand work to the Fleet. Modes: single (
 Whether orchestration mode is active for a session. When engaged: the delegation policy is injected every turn, and the Orchestrator's tools are reduced to the Keep-list. When disengaged: pi behaves normally. The `/orchestrator` command toggles engagement persistently (see ADR-0003).
 
 ### Keep-list
-The configurable set of tool names that stay active for the Orchestrator while engaged. Everything else is removed from the active set AND hard-blocked. The default keep-list is exactly the configured matchers plus `delegate`; discovered extensions are displayed but not kept unless a matcher names them (`autoKeepExtensions: true` opts back into keeping discovered extensions; see ADR-0004). Stored in `~/.pi/agent/orchestrator.json`.
+The configurable set of tool names that stay active for the Orchestrator while engaged. Everything else is removed from the active set AND hard-blocked. Semantics are derived from emptiness: an empty keep-list auto-keeps every discovered extension; a non-empty keep-list keeps exactly the configured matchers plus `delegate` — discovered extensions are displayed but not kept unless a matcher names them (see ADR-0004). Stored in `~/.pi/agent/orchestrator.json`.
 
 ### Gate
 The hard enforcement layer: a `tool_call` interception that blocks any tool call from the Orchestrator that is not on the Keep-list, with a reason instructing it to use `delegate`. The Gate is the teeth; the policy is the instruction (see ADR-0001).
