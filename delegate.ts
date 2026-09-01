@@ -64,6 +64,8 @@ interface RunningTask {
 	/** Dispatch mode of the delegate call that spawned this task. */
 	mode: "single" | "parallel" | "chain";
 	turns: number;
+	/** Tool-bearing turns only (matches the TUI's tool-call view); raw turns stay in `turns` for the budget. */
+	toolTurns: number;
 	contextTokens: number;
 	inputTokens: number;
 	outputTokens: number;
@@ -128,7 +130,7 @@ export function renderFleetLines(tasks: RunningTask[], agentNames: string[]): st
 				: task.agent.padEnd(nameWidth);
 		const summary = truncateWithEllipsis(task.task, MAX_TASK_SUMMARY_CHARS);
 		lines.push(
-			`  ${name} · turn ${task.turns} · ctx ${formatTokens(task.contextTokens)}` +
+			`  ${name} · turn ${task.toolTurns} · ctx ${formatTokens(task.contextTokens)}` +
 				` · ↑${formatTokens(task.inputTokens)} ↓${formatTokens(task.outputTokens)} · "${summary}"`,
 		);
 	}
@@ -325,6 +327,8 @@ interface UsageStats {
 	cost: number;
 	contextTokens: number;
 	turns: number;
+	/** Tool-bearing turns (widget display); `turns` stays raw for the budget. */
+	toolTurns: number;
 }
 
 interface SingleResult {
@@ -348,6 +352,19 @@ interface SingleResult {
 export interface SubagentDetails {
 	mode: "single" | "parallel" | "chain";
 	results: SingleResult[];
+}
+
+/**
+ * True when a turn carried tool activity: non-empty `toolResults` (turn_end
+ * carries them, pi extensions.md) or toolCall parts in the assistant message
+ * (same detection getDisplayItems uses). The fleet widget counts only
+ * tool-bearing turns so it matches the TUI's tool-call view; the turn budget
+ * keeps counting raw turns (ADR-0006).
+ */
+export function isToolTurn(message: Message | undefined, toolResults?: readonly unknown[]): boolean {
+	if (toolResults && toolResults.length > 0) return true;
+	if (!message || message.role !== "assistant") return false;
+	return message.content.some((part) => part.type === "toolCall");
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -636,7 +653,7 @@ async function runSingleAgent(
 			completedNormally: false,
 			messages: [],
 			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0, toolTurns: 0 },
 			step,
 		};
 	}
@@ -666,7 +683,7 @@ async function runSingleAgent(
 		completedNormally: false,
 		messages: [],
 		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0, toolTurns: 0 },
 		model,
 		step,
 	};
@@ -677,6 +694,7 @@ async function runSingleAgent(
 		task,
 		mode: fleetMode,
 		turns: 0,
+		toolTurns: 0,
 		contextTokens: 0,
 		inputTokens: 0,
 		outputTokens: 0,
@@ -743,6 +761,7 @@ async function runSingleAgent(
 			proc.stdin?.on("error", () => {});
 			// Track for the fleet widget
 			fleetTask.turns = 0;
+			fleetTask.toolTurns = 0;
 			runningTasks.set(agentKey, fleetTask);
 			onFleetChange();
 
@@ -861,6 +880,10 @@ async function runSingleAgent(
 				if (event.type === "turn_end" && event.message?.role === "assistant" && !settled) {
 					currentResult.usage.turns++;
 					fleetTask.turns = currentResult.usage.turns;
+					if (isToolTurn(event.message as Message, event.toolResults)) {
+						currentResult.usage.toolTurns++;
+						fleetTask.toolTurns = currentResult.usage.toolTurns;
+					}
 
 					// Two-stage turn budget (ADR-0006): soft grace at the
 					// budget (once), hard kill after the grace margin.
@@ -1167,7 +1190,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 							completedNormally: false,
 							messages: [],
 							stderr: "",
-							usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+							usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0, toolTurns: 0 },
 						};
 					}
 

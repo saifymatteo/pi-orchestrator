@@ -11,10 +11,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { idleFleetWidgetLines, renderFleetLines } from "../delegate.ts";
-import { collectTouchedFiles, fleetKey, formatTouchedFiles, nextFleetRunId } from "../delegate.ts";
+import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId } from "../delegate.ts";
 import { buildChildSpawnArgs, expandBlockedToolsToNames } from "../delegate.ts";
 
-/** Minimal RunningTask-shaped fixture (mode is the only new required field). */
+/** Minimal RunningTask-shaped fixture (mode is the only other required field).
+ *  toolTurns defaults to turns (1); tests that need a mismatch override it. */
 function task(overrides = {}) {
 	return {
 		id: "task0",
@@ -22,6 +23,7 @@ function task(overrides = {}) {
 		task: "recon auth flow",
 		mode: "single",
 		turns: 1,
+		toolTurns: 1,
 		contextTokens: 0,
 		inputTokens: 0,
 		outputTokens: 0,
@@ -58,6 +60,7 @@ test("per-agent line keeps token formatting and quoted task summary", () => {
 				task: "implement guardrail",
 				mode: "parallel",
 				turns: 7,
+				toolTurns: 7,
 				contextTokens: 45200,
 				inputTokens: 3000,
 				outputTokens: 12000,
@@ -110,7 +113,7 @@ test("task summary at exactly 40 chars is not truncated", () => {
 
 test("agent names are padded to the longest current name for alignment", () => {
 	const lines = renderFleetLines(
-		[task({ agent: "scout" }), task({ agent: "longername", turns: 2 })],
+		[task({ agent: "scout" }), task({ agent: "longername", turns: 2, toolTurns: 2 })],
 		["scout", "longername"],
 	);
 	assert.ok(lines[1].startsWith("  scout      · turn 1"));
@@ -118,7 +121,7 @@ test("agent names are padded to the longest current name for alignment", () => {
 });
 
 test("agent names longer than 12 chars are truncated, never padded", () => {
-	const lines = renderFleetLines([task({ agent: "averylongagentname", turns: 3 })], ["averylongagentname"]);
+	const lines = renderFleetLines([task({ agent: "averylongagentname", turns: 3, toolTurns: 3 })], ["averylongagentname"]);
 	assert.ok(lines[1].startsWith("  averylongage · turn 3"));
 	assert.equal(lines[1].indexOf("averylongagentname"), -1);
 });
@@ -224,8 +227,43 @@ test("fleetKey is distinct for two simulated concurrent invocations of every mod
 });
 
 test("renderFleetLines with two single-mode tasks shows 2 running", () => {
-	const lines = renderFleetLines([task({ agent: "scout" }), task({ agent: "worker", turns: 2 })], ["scout", "worker"]);
+	const lines = renderFleetLines(
+		[task({ agent: "scout" }), task({ agent: "worker", turns: 2, toolTurns: 2 })],
+		["scout", "worker"],
+	);
 	assert.equal(lines[0], "⏳ Fleet · single · 2 running");
+});
+
+// ── Fleet widget shows tool-bearing turns (matches TUI tool-call view) ─────
+
+test("renderFleetLines displays toolTurns, not the raw turn count", () => {
+	// 7 raw turns, 6 tool-bearing (final text-only wrap-up excluded) — the
+	// widget must read turn 6 to match the TUI's tool-call count.
+	const lines = renderFleetLines([task({ turns: 7, toolTurns: 6 })], ["scout"]);
+	assert.match(lines[1], /· turn 6 ·/);
+	assert.ok(!lines[1].includes("turn 7"));
+});
+
+// ── isToolTurn (turn_end counting helper) ───────────────────────────────
+
+test("isToolTurn: assistant message with toolCall parts → true", () => {
+	const msg = assistantMsg([toolCall("read", { file_path: "/a.ts" })]);
+	assert.equal(isToolTurn(msg as any), true);
+});
+
+test("isToolTurn: text-only assistant message → false", () => {
+	const msg = assistantMsg([{ type: "text", text: "all done" }]);
+	assert.equal(isToolTurn(msg as any), false);
+});
+
+test("isToolTurn: empty/missing message → false", () => {
+	assert.equal(isToolTurn(assistantMsg([]) as any), false);
+	assert.equal(isToolTurn(undefined), false);
+});
+
+test("isToolTurn: non-empty toolResults → true even without toolCall parts", () => {
+	const msg = assistantMsg([{ type: "text", text: "hmm" }]);
+	assert.equal(isToolTurn(msg as any, [{ toolCallId: "t1" }]), true);
 });
 
 // ── Touched-files extraction (collectTouchedFiles / formatTouchedFiles) ────
