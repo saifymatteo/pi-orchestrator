@@ -9,6 +9,10 @@ This whole project is wholly written by GLM 5.3 Flash via Pi harness. This packa
 ## Install
 
 ```bash
+# From npm
+pi install npm:@saifymatteo/pi-orchestrator
+
+# From git
 pi install git:github.com/saifymatteo/pi-orchestrator
 ```
 
