@@ -415,6 +415,37 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
 	return items;
 }
 
+/**
+ * File paths a subagent wrote or edited, from assistant toolCall parts of the
+ * write/edit builtins (same file_path/path arg shapes formatToolCall handles).
+ * Skips non-string/empty values; dedupes preserving first-seen order.
+ */
+export function collectTouchedFiles(messages: Message[]): string[] {
+	const files: string[] = [];
+	const seen = new Set<string>();
+	for (const msg of messages) {
+		if (msg.role !== "assistant") continue;
+		for (const part of msg.content) {
+			if (part.type !== "toolCall" || (part.name !== "write" && part.name !== "edit")) continue;
+			const args = part.arguments as Record<string, unknown> | undefined;
+			const raw = (args?.file_path || args?.path) as string | undefined;
+			if (typeof raw !== "string" || raw === "" || seen.has(raw)) continue;
+			seen.add(raw);
+			files.push(raw);
+		}
+	}
+	return files;
+}
+
+/** One-line "Files touched: ..." summary; capped at `cap` paths (default 10). */
+export function formatTouchedFiles(files: string[], cap = 10): string {
+	if (files.length === 0) return "";
+	const shown = files.slice(0, cap);
+	let text = `Files touched: ${shown.join(", ")}`;
+	if (files.length > cap) text += `, … and ${files.length - cap} more`;
+	return text;
+}
+
 async function mapWithConcurrencyLimit<TIn, TOut>(
 	items: TIn[],
 	concurrency: number,
@@ -926,6 +957,12 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 			// Unique per invocation: concurrent delegate calls must not collide on
 			// runningTasks keys, or the fleet header undercounts running agents.
 			const runId = nextFleetRunId();
+			// Append the touched-files line (derived from the run's own messages)
+			// to returned text — \n\n-joined, omitted entirely when nothing touched.
+			const withTouchedFiles = (text: string, messages: Message[]): string => {
+				const files = formatTouchedFiles(collectTouchedFiles(messages));
+				return files ? `${text}\n\n${files}` : text;
+			};
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -995,8 +1032,14 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						}
 						previousOutput = getFinalOutput(result.messages);
 					}
+					const lastResult = results[results.length - 1];
 					return {
-						content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
+						content: [
+							{
+								type: "text",
+								text: withTouchedFiles(getFinalOutput(lastResult.messages) || "(no output)", lastResult.messages),
+							},
+						],
 						details: makeDetails("chain")(results),
 					};
 				}
@@ -1072,7 +1115,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						const status = isFailedResult(r)
 							? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
 							: "completed";
-						return `### [${r.agent}] ${status}\n\n${output}`;
+						return withTouchedFiles(`### [${r.agent}] ${status}\n\n${output}`, r.messages);
 					});
 					return {
 						content: [
@@ -1102,13 +1145,26 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 					);
 					if (isFailedResult(result)) {
 						return {
-							content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${getResultOutput(result)}` }],
+							content: [
+								{
+									type: "text",
+									text: withTouchedFiles(
+										`Agent ${result.stopReason || "failed"}: ${getResultOutput(result)}`,
+										result.messages,
+									),
+								},
+							],
 							details: makeDetails("single")([result]),
 							isError: true,
 						};
 					}
 					return {
-						content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+						content: [
+							{
+								type: "text",
+								text: withTouchedFiles(getFinalOutput(result.messages) || "(no output)", result.messages),
+							},
+						],
 						details: makeDetails("single")([result]),
 					};
 				}

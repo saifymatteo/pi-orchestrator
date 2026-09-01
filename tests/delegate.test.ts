@@ -11,7 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { idleFleetWidgetLines, renderFleetLines } from "../delegate.ts";
-import { fleetKey, nextFleetRunId } from "../delegate.ts";
+import { collectTouchedFiles, fleetKey, formatTouchedFiles, nextFleetRunId } from "../delegate.ts";
 
 /** Minimal RunningTask-shaped fixture (mode is the only new required field). */
 function task(overrides = {}) {
@@ -225,5 +225,63 @@ test("fleetKey is distinct for two simulated concurrent invocations of every mod
 test("renderFleetLines with two single-mode tasks shows 2 running", () => {
 	const lines = renderFleetLines([task({ agent: "scout" }), task({ agent: "worker", turns: 2 })], ["scout", "worker"]);
 	assert.equal(lines[0], "⏳ Fleet · single · 2 running");
+});
+
+// ── Touched-files extraction (collectTouchedFiles / formatTouchedFiles) ────
+
+function assistantMsg(content: any[]) {
+	return { role: "assistant", content };
+}
+
+function toolCall(name: string, args: Record<string, unknown>) {
+	return { type: "toolCall", name, arguments: args };
+}
+
+test("collectTouchedFiles: write + edit paths collected, read/bash ignored", () => {
+	const messages = [
+		assistantMsg([
+			toolCall("read", { file_path: "/src/ignored.ts" }),
+			toolCall("bash", { command: "touch /src/ignored2.ts" }),
+		]),
+		assistantMsg([toolCall("write", { file_path: "/src/a.ts", content: "x" })]),
+		assistantMsg([toolCall("edit", { path: "/src/b.ts", oldText: "a", newText: "b" })]),
+	];
+	assert.deepEqual(collectTouchedFiles(messages as any), ["/src/a.ts", "/src/b.ts"]);
+});
+
+test("collectTouchedFiles: falls back from file_path to path", () => {
+	const messages = [
+		assistantMsg([toolCall("write", { path: "/via/path.ts" })]),
+		assistantMsg([toolCall("edit", { file_path: "/via/file_path.ts" })]),
+	];
+	assert.deepEqual(collectTouchedFiles(messages as any), ["/via/path.ts", "/via/file_path.ts"]);
+});
+
+test("collectTouchedFiles: dedupes preserving first-seen order", () => {
+	const messages = [
+		assistantMsg([toolCall("write", { file_path: "/b.ts" }), toolCall("edit", { file_path: "/a.ts" })]),
+		assistantMsg([toolCall("edit", { path: "/b.ts" })]),
+	];
+	assert.deepEqual(collectTouchedFiles(messages as any), ["/b.ts", "/a.ts"]);
+});
+
+test("collectTouchedFiles: skips non-string and empty paths, empty messages → []", () => {
+	const messages = [
+		assistantMsg([toolCall("write", { file_path: 42 }), toolCall("edit", { file_path: "" })]),
+		assistantMsg([{ type: "text", text: "no tool calls here" }]),
+	];
+	assert.deepEqual(collectTouchedFiles(messages as any), []);
+	assert.deepEqual(collectTouchedFiles([]), []);
+});
+
+test("formatTouchedFiles: caps at 10 with a … and N more suffix", () => {
+	const files = Array.from({ length: 12 }, (_, i) => `/f${i}.ts`);
+	const text = formatTouchedFiles(files);
+	assert.ok(text.startsWith(`Files touched: ${files.slice(0, 10).join(", ")}`));
+	assert.ok(text.endsWith(", … and 2 more"));
+});
+
+test("formatTouchedFiles: empty input returns empty string", () => {
+	assert.equal(formatTouchedFiles([]), "");
 });
 
