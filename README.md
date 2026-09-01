@@ -8,6 +8,8 @@ This whole project is wholly written by GLM 5.3 Flash via Pi harness. This packa
 
 ## Install
 
+Requires pi >= 0.84.0.
+
 ```bash
 # From npm
 pi install npm:@saifymatteo/pi-orchestrator

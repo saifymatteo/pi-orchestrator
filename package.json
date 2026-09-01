@@ -12,12 +12,9 @@
     "pi",
     "coding",
     "agent",
-    "pi",
     "harness",
     "subagent",
     "subagents",
-    "agent",
-    "orchestration",
     "orchestration",
     "orchestrator"
   ],
@@ -43,9 +40,11 @@
     "test": "tests"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.84.0",
-    "@earendil-works/pi-coding-agent": ">=0.84.0",
-    "@earendil-works/pi-tui": ">=0.84.0"
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "scripts": {
     "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts tests/index.test.ts"
