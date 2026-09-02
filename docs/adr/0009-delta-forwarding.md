@@ -1,0 +1,15 @@
+# Delta-forwarding: strip duplicated segments from the forwarded parent prompt
+
+The prompt-inheritance feature (config `forwardParentPrompt`) appends the parent's pre-policy system prompt to the child's system prompt so extensions' promptGuidelines (e.g. CodeGraph tool usage guidance) reach subagents. Investigation of a captured session showed that large parts of the forwarded parent prompt are byte-identical — or verbatim-subset — duplicates of what the child already assembles itself: the `<project_context>` block (AGENTS.md content, same repo), the `Current working directory:` line (same cwd), and the `## Agent skills` slice (same skill set). Forwarding them again is pure token cost with zero informational value. We decided on a membership-gated strip: before appending, the parent prompt is delta-stripped of any segment that appears verbatim in the child's own system prompt — a span is removed only if it was extracted from the parent prompt AND the child's prompt contains that exact byte sequence. Under-stripping is allowed; over-stripping is impossible by construction. Partial skills duplication is kept intact (the parent's skills section is stripped only when its entire slice is a contiguous verbatim substring of the child's), and an empty strip result appends nothing.
+
+## Considered options
+
+- Unconditional strip (rejected): removing the segments without checking the child's actual prompt over-strips when a per-task `cwd` override makes the child run in a different directory — there the parent's project_context/cwd/skills differ from the child's and carry real information. The membership check makes the per-task-cwd case a no-op by construction.
+- Parent↔child prefix alignment for provider cache hits (rejected): impossible under the byte-prefix forwarding design — the child's tools array and system-prompt head differ from the parent's at byte 0, so no cross-agent cache hits can exist. The actual caching win is per-agent-class repeated-spawn caching (stable `--session-id` per (agent, model) plus an identical stable prefix across spawns of the same class), which already works and does not require aligning parent and child prompts.
+
+## Consequences
+
+- Deterministic byte output: the strip is a pure function of (child prompt, parent prompt), so the child's system prompt is byte-stable across spawns — the per-agent-class cache prefix stays stable (stableSessionId, fixed model per class unchanged).
+- Measured duplication varies by session: ~571 bytes saved on the captured data, larger in real sessions with bigger AGENTS.md/skill lists; the strip is best-effort by design, not a fixed saving.
+- The base-prompt body, the Toolbelt notice, and the CodeGraph guidance are intentionally kept — they either differ from the child's own copies or are informational payload, so the membership check never matches them.
+- Fail-soft and self-validating: if a future pi assembly change alters the child's prompt, the membership check simply fails and nothing is stripped — the worst case is under-stripping (harmless token cost), never a broken or over-stripped prompt.

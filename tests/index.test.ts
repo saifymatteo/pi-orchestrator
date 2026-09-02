@@ -15,6 +15,7 @@ import {
 	installChildParentPrompt,
 	installChildToolGate,
 	parseBlockedToolsEnv,
+	stripDuplicatedParentSegments,
 	withParentPrompt,
 } from "../index.ts";
 import { DEFAULT_CONFIG, type OrchestratorConfig } from "../config.ts";
@@ -186,6 +187,79 @@ test("withParentPrompt: falsy systemPrompt ⇒ parent prompt becomes the whole p
 	assert.equal(withParentPrompt("", "parent rules"), "parent rules");
 });
 
+// ── Delta-forwarding (stripDuplicatedParentSegments) ───────────────────
+
+const CHILD_WITH_DUPES =
+	"base\n\n<project_context>\nAGENTS.md content\n</project_context>\n\n" +
+	"Current working directory: D:/Git/x\n\nToolbelt: 4 tools";
+
+const PARENT_WITH_DUPES =
+	"Available tools:\n- recall\n\n" +
+	"<project_context>\nAGENTS.md content\n</project_context>\n\n" +
+	"Current working directory: D:/Git/x\n\n" +
+	"Toolbelt: 36 tools\n\nCodeGraph tools are available.";
+
+const PARENT_STRIPPED =
+	"Available tools:\n- recall\n\nToolbelt: 36 tools\n\nCodeGraph tools are available.";
+
+test("stripDuplicatedParentSegments: removes verbatim-duplicated project_context + cwd, keeps the rest", () => {
+	assert.equal(stripDuplicatedParentSegments(CHILD_WITH_DUPES, PARENT_WITH_DUPES), PARENT_STRIPPED);
+});
+
+test("stripDuplicatedParentSegments: deterministic — same inputs, same output bytes", () => {
+	const once = stripDuplicatedParentSegments(CHILD_WITH_DUPES, PARENT_WITH_DUPES);
+	for (let i = 0; i < 5; i++) {
+		assert.equal(stripDuplicatedParentSegments(CHILD_WITH_DUPES, PARENT_WITH_DUPES), once);
+	}
+});
+
+test("stripDuplicatedParentSegments: keeps segments NOT present in the child's prompt (per-task cwd override)", () => {
+	const childOtherCwd =
+		"base\n\n<project_context>\nOTHER repo AGENTS.md\n</project_context>\n\n" +
+		"Current working directory: D:/Other\n\nToolbelt: 4 tools";
+	// Neither the parent's project_context block nor its cwd line appears in
+	// the child's prompt ⇒ both must survive untouched.
+	assert.equal(stripDuplicatedParentSegments(childOtherCwd, PARENT_WITH_DUPES), PARENT_WITH_DUPES);
+});
+
+test("stripDuplicatedParentSegments: partially-duplicated segments (skills) are left intact", () => {
+	// The child's skills section DIVERGES from the parent's (not a contiguous
+	// verbatim substring) ⇒ the parent's whole section must survive.
+	const parent = "## Agent skills\n\n### Issue tracker\n\nSee docs.\n\n---\n\nBase body";
+	const child = "## Agent skills\n\n### Triage labels\n\nDifferent docs.\n\n---\n\nBase body";
+	assert.equal(stripDuplicatedParentSegments(child, parent), parent);
+});
+
+test("stripDuplicatedParentSegments: verbatim-duplicated skills section is stripped", () => {
+	// The parent's entire skills slice appears contiguously in the child's
+	// (superset) skills section ⇒ every byte is already present ⇒ strip.
+	const parentSkills = "## Agent skills\n\n### Issue tracker\n\nSee docs.";
+	const parent = `${parentSkills}\n\n---\n\nBase body`;
+	const child = `prefix\n\n${parentSkills}\n\n### Domain docs\n\nMore.\n\n---\n\nchild base`;
+	assert.equal(stripDuplicatedParentSegments(child, parent), "\n---\n\nBase body");
+});
+
+test("stripDuplicatedParentSegments: undefined child prompt ⇒ parent prompt returned unchanged", () => {
+	assert.equal(stripDuplicatedParentSegments(undefined, PARENT_WITH_DUPES), PARENT_WITH_DUPES);
+});
+
+test("withParentPrompt: fully-duplicated parent prompt strips to empty ⇒ nothing appended", () => {
+	// Every segment of the parent prompt (project_context + cwd line) already
+	// appears verbatim in the child's prompt ⇒ delta-stripping yields an empty
+	// string ⇒ withParentPrompt must return the child prompt unchanged (no
+	// trailing blank line, no forwarded artifacts).
+	const shared = "<project_context>\nsame AGENTS.md\n</project_context>\n\nCurrent working directory: D:\\Git\\repo";
+	const child = `base\n\n${shared}`;
+	const stripped = stripDuplicatedParentSegments(child, shared);
+	assert.equal(stripped, "");
+	assert.equal(withParentPrompt(child, stripped), child);
+});
+
+test("stripDuplicatedParentSegments: parent prompt without duplicable segments is a no-op", () => {
+	const parent = "extension guidance\n\nMore guidance";
+	assert.equal(stripDuplicatedParentSegments(CHILD_WITH_DUPES, parent), parent);
+});
+
 test("installChildParentPrompt: unset env installs no handler", () => {
 	delete process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE;
 	const pi = capturePi();
@@ -205,6 +279,24 @@ test("installChildParentPrompt: set env appends the file contents at the END of 
 		assert.ok(handler, "forwarding handler should be installed");
 		const result = await handler({ systemPrompt: "base\nproject_context\nskills\ncwd" });
 		assert.deepEqual(result, { systemPrompt: "base\nproject_context\nskills\ncwd\n\nparent rules" });
+	} finally {
+		delete process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE;
+		await fs.promises.rm(tmp, { recursive: true, force: true });
+	}
+});
+
+test("installChildParentPrompt: duplicated project_context/cwd segments are delta-stripped before appending", async () => {
+	const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-orchestrator-test-"));
+	const promptFile = path.join(tmp, "parent.md");
+	await fs.promises.writeFile(promptFile, PARENT_WITH_DUPES, "utf-8");
+	process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE = promptFile;
+	try {
+		const pi = capturePi();
+		installChildParentPrompt(pi as any);
+		const handler = pi.handlers["before_agent_start"]?.[0];
+		assert.ok(handler, "forwarding handler should be installed");
+		const result = await handler({ systemPrompt: CHILD_WITH_DUPES });
+		assert.deepEqual(result, { systemPrompt: `${CHILD_WITH_DUPES}\n\n${PARENT_STRIPPED}` });
 	} finally {
 		delete process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE;
 		await fs.promises.rm(tmp, { recursive: true, force: true });

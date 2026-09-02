@@ -79,15 +79,95 @@ export function installChildToolGate(pi: any): void {
 }
 
 /**
- * Pure transformation: append the parent prompt at the END of the child's
- * system prompt (after pi base, agent body, project_context, skills, and
- * cwd). Exported for unit tests (tests/index.test.ts).
+ * Pure transformation: append the (already delta-stripped) parent prompt at
+ * the END of the child's system prompt (after pi base, agent body,
+ * project_context, skills, and cwd). Exported for unit tests
+ * (tests/index.test.ts).
  */
 export function withParentPrompt(systemPrompt: string | undefined, parentPrompt: string): string {
-	// Empty guard: an empty parent prompt appends nothing — returning the
-	// child's prompt unchanged avoids a dangling trailing blank line.
+	// Empty-result guard: if delta-stripping removed everything (parent prompt
+	// fully duplicated in the child), append nothing — returning the child's
+	// prompt unchanged avoids a dangling trailing blank line and any
+	// forwarding artifacts.
 	if (!parentPrompt) return systemPrompt ?? "";
 	return systemPrompt ? `${systemPrompt}\n\n${parentPrompt}` : parentPrompt;
+}
+
+/**
+ * Delta-forwarding: strip segments of the parent's forwarded prompt that the
+ * child ALREADY receives verbatim through its own system-prompt assembly.
+ *
+ * Why: the child runs in the same cwd with the same extension set, so pi's
+ * normal assembly injects the identical <project_context> block (AGENTS.md
+ * content) and the identical "Current working directory:" line into the
+ * child's own prompt. Forwarding a second verbatim copy costs ~tokens with
+ * zero informational value (measured on a captured session locally). Only
+ * these two segments are stripped;
+ * everything else in the forwarded prompt is the actual informational
+ * payload and stays: the base-prompt body (NOT duplicated — the child
+ * embeds its own tool list, so the bytes diverge), the Toolbelt notice and
+ * the CodeGraph/extension guidance (both differ from the child's own
+ * copies). The skills section is conditionally stripped — only when the
+ * parent's entire slice appears verbatim in the child's prompt (see the
+ * Segment 3 comment below).
+ *
+ * Safety guard: a segment is only removed when the child's own system prompt
+ * (`childPrompt`, the pre-append event.systemPrompt) contains that exact
+ * byte sequence. This covers the per-task `cwd` override case (delegate tool):
+ * when the child runs in a DIFFERENT directory its project_context/cwd differ
+ * from the parent's, the membership check fails, and nothing is stripped.
+ * The check also makes the strip self-validating against future pi assembly
+ * changes — worst case we under-strip (harmless), never over-strip.
+ *
+ * Determinism (cache-prefix stability): pure function of (childPrompt,
+ * parentPrompt) — same inputs always produce the same output bytes. The join
+ * point is normalized to exactly one blank line, matching the surrounding
+ * prompt's paragraph separator.
+ *
+ * Exported for unit tests (tests/index.test.ts).
+ */
+export function stripDuplicatedParentSegments(childPrompt: string | undefined, parentPrompt: string): string {
+	if (!childPrompt) return parentPrompt;
+	let result = parentPrompt;
+
+	/** Remove `segment` from `result` plus ONE following blank-line separator
+	 *  (so the text before and after the removal stays single-blank-line
+	 *  separated) — but only when the child's own prompt contains the segment
+	 *  verbatim; otherwise leave it untouched. */
+	const removeIfDuplicated = (segment: string): void => {
+		if (!segment || !childPrompt.includes(segment)) return;
+		const start = result.indexOf(segment);
+		if (start === -1) return; // defensive; segment came from `result` itself
+		const end = start + segment.length;
+		const after = result.startsWith("\n\n", end) ? end + 2 : end;
+		result = result.slice(0, start) + result.slice(after);
+	};
+
+	// Segment 1: the <project_context> block (first occurrence — pi injects
+	// exactly one; a non-greedy match keeps the boundary tight).
+	const ctx = /<project_context>[\s\S]*?<\/project_context>/.exec(result);
+	if (ctx) removeIfDuplicated(ctx[0]);
+
+	// Segment 2: the cwd line (start-of-line anchored, single line).
+	const cwd = /^Current working directory: .*$/m.exec(result);
+	if (cwd) removeIfDuplicated(cwd[0]);
+
+	// Segment 3: the skills injection section ("## Agent skills" up to the
+	// "---" separator). This one is frequently only PARTIALLY duplicated —
+	// the parent's and child's skill lists can diverge — so unlike segments
+	// 1 and 2 it is gated purely by the verbatim-membership check: it is
+	// stripped only when the parent's ENTIRE slice is a contiguous verbatim
+	// substring of the child's own prompt, i.e. every byte already exists in
+	// the child's copy. A partial match (child has extra/different skills)
+	// leaves the parent's section fully intact.
+	const skillsStart = result.indexOf("## Agent skills");
+	if (skillsStart !== -1) {
+		const sepIdx = result.indexOf("\n---\n", skillsStart);
+		const skills = sepIdx === -1 ? result.slice(skillsStart) : result.slice(skillsStart, sepIdx);
+		removeIfDuplicated(skills);
+	}
+
+	return result;
 }
 
 /**
@@ -96,9 +176,11 @@ export function withParentPrompt(systemPrompt: string | undefined, parentPrompt:
  * path via PI_ORCHESTRATOR_PARENT_PROMPT_FILE; this hook appends it at the
  * END of the child's system prompt (after project_context/skills/cwd) so the
  * stable shared prefix — pi base, agent body, context, skills, cwd — is
- * maximized for provider prompt-cache hits. Deterministic — the same
- * (child prompt, parent prompt) pair always yields the same bytes, so the
- * cache prefix stays stable across spawns. Fail-soft: with the env var
+ * maximized for provider prompt-cache hits. Before appending, the copy is
+ * delta-stripped (stripDuplicatedParentSegments): segments the child already
+ * receives verbatim (project_context, cwd) are dropped. Deterministic — the
+ * same (child prompt, parent prompt) pair always yields the same bytes, so
+ * the cache prefix stays stable across spawns. Fail-soft: with the env var
  * unset nothing is installed; a failed file read is a silent pass-through so
  * the child works without the forwarding.
  */
@@ -113,7 +195,7 @@ export function installChildParentPrompt(pi: any): void {
 		} catch {
 			return undefined;
 		}
-		const finalPrompt = withParentPrompt(event.systemPrompt, parentPrompt);
+		const finalPrompt = withParentPrompt(event.systemPrompt, stripDuplicatedParentSegments(event.systemPrompt, parentPrompt));
 		return { systemPrompt: finalPrompt };
 	});
 }

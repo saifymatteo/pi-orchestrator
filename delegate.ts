@@ -758,7 +758,9 @@ async function runSingleAgent(
 		// hook (installChildParentPrompt in index.ts) appends it at the END of
 		// the system prompt — after project_context/skills/cwd — so the stable
 		// shared prefix (base prompt, context, skills, cwd) is maximized for
-		// provider prompt-cache hits.
+		// provider prompt-cache hits. The child-side hook also delta-strips
+		// segments the child already receives verbatim (project_context, cwd)
+		// from the forwarded copy — see stripDuplicatedParentSegments.
 		if (parentPrompt?.trim()) {
 			const tmp = await writePromptToTempFile(`${agent.name}-parent`, parentPrompt);
 			tmpParentPromptDir = tmp.dir;
