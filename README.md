@@ -113,7 +113,7 @@ Note: to keep the child-side tool gate and orphan watchdog alive in isolated chi
 
 ### `forwardParentPrompt` (boolean, default `true`)
 
-When `true`, every subagent's system prompt gets the orchestrator parent's pre-policy system prompt appended (after the agent's own body, before the `# Tool policy` hint). This carries installed extensions' promptGuidelines — e.g. CodeGraph's tool usage guidance, which is injected into the parent's prompt — into subagents, so they use those tools effectively. Set to `false` to keep subagent prompts minimal (agent body + tool-policy hint only).
+When `true`, every subagent gets the orchestrator parent's pre-policy system prompt appended at the **END** of its system prompt (after pi's base prompt, the agent body, project context, skills, and cwd). The forwarding is done child-side: the parent writes the prompt to a temp file and passes its path via `PI_ORCHESTRATOR_PARENT_PROMPT_FILE`; a child-side `before_agent_start` hook appends it last. This ordering maximizes the stable shared prefix (base, context, skills, cwd) across children, which improves provider prompt-cache hit rates — only the task-specific tail differs. The appended prompt carries installed extensions' promptGuidelines — e.g. CodeGraph's tool usage guidance, which is injected into the parent's prompt — into subagents, so they use those tools effectively. Set to `false` to keep subagent prompts minimal (agent body + tool-policy hint only; no file or env var is set).
 
 ### `builtinFleet` (boolean, default `true`)
 
@@ -178,6 +178,10 @@ Precedence on name collision: **project > user > builtin**. Within the project t
 ## Child extension control
 
 Children inherit every globally installed extension (ADR-0005), and pi offers no way to suppress extensions at handler level — only spawn-time flags (`--no-extensions` plus selective `-e`). That matters because some extensions misbehave in short-lived RPC children: pi-workspace-history's 60s cleanup deletes other sessions' shadow repos (`repo.git`) when more than three sessions share a workspace, and its cached validation never re-checks, so the parent TUI spams `fatal: not a git repository` banners on every `turn_end`/`agent_settled`. To isolate children, list the extension sources a child actually needs in `childExtensions` — a non-empty list spawns children with `--no-extensions` plus one `-e` per entry, so nothing else loads (note this removes pi-orchestrator itself too, so the ADR-0007 tool gate and orphan watchdog go quiet unless the package is re-added via `childExtensions`); an empty list keeps the inherit-all default (ADR-0008).
+
+## Stable child session ids
+
+Children are spawned with a deterministic `--session-id` (works alongside `--no-session`, which only disables on-disk persistence): the id is a hash of `orchestrator:<agent-name>:<model>`, so it is stable per (agent, model) pair across spawns and parent restarts. OpenAI-compatible providers derive their `prompt_cache_key` / session-affinity key from the session id, so this keeps a given agent's requests on the same cache shard; Anthropic's native caching is content-prefix based and unaffected.
 
 ## Guardrails (optional)
 

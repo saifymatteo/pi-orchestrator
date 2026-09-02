@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 
 import { idleFleetWidgetLines, renderFleetLines } from "../delegate.ts";
 import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId } from "../delegate.ts";
-import { buildChildSpawnArgs, expandBlockedToolsToNames } from "../delegate.ts";
+import { buildChildSpawnArgs, expandBlockedToolsToNames, stableSessionId } from "../delegate.ts";
 
 /** Minimal RunningTask-shaped fixture (mode is the only other required field).
  *  toolTurns defaults to turns (1); tests that need a mismatch override it. */
@@ -381,6 +381,42 @@ test("buildChildSpawnArgs: excludeTools becomes one comma-joined --exclude-tools
 
 	// Empty list → flag omitted entirely (the interception gate handles it).
 	assert.ok(!buildChildSpawnArgs({ extensions: [], excludeTools: [] }).includes("--exclude-tools"));
+});
+
+// ── stable --session-id per (agent, model) ─────────────────────────────
+
+/** pi's assertValidSessionId contract (verified in the pi binary):
+ *  non-empty, only [A-Za-z0-9._-], starts and ends alphanumeric. */
+const SESSION_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+test("buildChildSpawnArgs: sessionId is emitted as the trailing --session-id pair", () => {
+	const args = buildChildSpawnArgs({ extensions: [], excludeTools: [], sessionId: "abc123" });
+	assert.deepEqual(args.slice(-2), ["--session-id", "abc123"]);
+	assert.equal(args.indexOf("--session-id"), args.length - 2, "pair must be last (after --exclude-tools)");
+});
+
+test("buildChildSpawnArgs: sessionId omitted ⇒ no --session-id flag", () => {
+	assert.ok(!buildChildSpawnArgs({ extensions: [], excludeTools: [] }).includes("--session-id"));
+});
+
+test("stableSessionId: deterministic across calls (same inputs → same output)", () => {
+	assert.equal(stableSessionId("scout", "openrouter/cheap"), stableSessionId("scout", "openrouter/cheap"));
+	assert.equal(stableSessionId("worker", undefined), stableSessionId("worker", undefined));
+});
+
+test("stableSessionId: differs per agent name and per model", () => {
+	assert.notEqual(stableSessionId("scout", "openrouter/cheap"), stableSessionId("worker", "openrouter/cheap"));
+	assert.notEqual(stableSessionId("scout", "openrouter/cheap"), stableSessionId("scout", "openrouter/premium"));
+});
+
+test("stableSessionId: output matches pi's assertValidSessionId format", () => {
+	for (const id of [
+		stableSessionId("scout", "openrouter/cheap"),
+		stableSessionId("a-very_long.agent-name", undefined),
+	]) {
+		assert.match(id, SESSION_ID_RE);
+		assert.equal(id.length, 32, "first 16 bytes of sha1 hex = 32 chars");
+	}
 });
 
 // ── expandBlockedToolsToNames (ADR-0008) ──────────────────────────────────

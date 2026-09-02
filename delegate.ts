@@ -27,6 +27,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -585,6 +586,10 @@ export function expandBlockedToolsToNames(
  */
 export function buildChildSpawnArgs(opts: {
 	model?: string;
+	/** Deterministic session id (stableSessionId) forwarded via pi's
+	 *  `--session-id`; works with --no-session (id lands in the in-memory
+	 *  SessionManager). */
+	sessionId?: string;
 	/** Only set when the child inherits dispatch config (agent frontmatter has
 	 *  no model — same rule as before this extraction). */
 	thinkingLevel?: ThinkingLevel;
@@ -605,7 +610,23 @@ export function buildChildSpawnArgs(opts: {
 		for (const ext of opts.extensions) args.push("-e", ext);
 	}
 	if (opts.excludeTools.length > 0) args.push("--exclude-tools", opts.excludeTools.join(","));
+	if (opts.sessionId) args.push("--session-id", opts.sessionId);
 	return args;
+}
+
+/**
+ * Deterministic session id per (agent, model): stabilizes the OpenAI-compat
+ * `prompt_cache_key` / session-affinity routing key across child spawns — pi
+ * derives prompt_cache_key from the session id, so without this each spawn
+ * lands on a random shard. Anthropic-native caching is content-prefix based
+ * and unaffected. Format conforms to pi's assertValidSessionId
+ * (/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/ — hex slug satisfies it).
+ */
+export function stableSessionId(agentName: string, model: string | undefined): string {
+	return createHash("sha1")
+		.update(`orchestrator:${agentName}:${model ?? "default"}`)
+		.digest("hex")
+		.slice(0, 32);
 }
 
 // ── Running one subagent ────────────────────────────────────────────────────
@@ -665,6 +686,7 @@ async function runSingleAgent(
 	const model = agent.model ?? dispatchDefaults.model;
 	const args = buildChildSpawnArgs({
 		model,
+		sessionId: stableSessionId(agent.name, model),
 		thinkingLevel: inheritsDispatchConfig ? dispatchDefaults.thinkingLevel : undefined,
 		tools: agent.tools,
 		extensions,
@@ -677,6 +699,8 @@ async function runSingleAgent(
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	let tmpParentPromptDir: string | null = null;
+	let parentPromptFilePath: string | undefined;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -714,15 +738,10 @@ async function runSingleAgent(
 
 	try {
 		// System prompt + tool-policy hint (ADR-0007): the child must know
-		// blocked tools fail before it tries them. The forwarded parent prompt
-		// (config `forwardParentPrompt`) carries the parent's pre-policy system
-		// prompt — including installed extensions' promptGuidelines — into the
-		// child. All parts are appended to the combined string so the empty-trim
-		// guard below covers them — an empty prompt with no forwarded prompt and
-		// no blocked tools writes nothing.
+		// blocked tools fail before it tries them. An empty prompt with no
+		// blocked tools writes nothing (empty-trim guard).
 		const sysPrompt =
 			agent.systemPrompt +
-			(parentPrompt ? `\n\n${parentPrompt}` : "") +
 			(blockedTools.length
 				? `\n\n# Tool policy\nThese tools are blocked by orchestrator policy and will fail if called: ${blockedTools.join(", ")}. Accomplish the task with the remaining tools.`
 				: "");
@@ -731,6 +750,19 @@ async function runSingleAgent(
 			tmpPromptDir = tmp.dir;
 			tmpPromptPath = tmp.filePath;
 			args.push("--append-system-prompt", tmpPromptPath);
+		}
+
+		// Parent prompt forwarding (config `forwardParentPrompt`): written to
+		// its own temp file and passed to the child via
+		// PI_ORCHESTRATOR_PARENT_PROMPT_FILE; the CHILD-side before_agent_start
+		// hook (installChildParentPrompt in index.ts) appends it at the END of
+		// the system prompt — after project_context/skills/cwd — so the stable
+		// shared prefix (base prompt, context, skills, cwd) is maximized for
+		// provider prompt-cache hits.
+		if (parentPrompt?.trim()) {
+			const tmp = await writePromptToTempFile(`${agent.name}-parent`, parentPrompt);
+			tmpParentPromptDir = tmp.dir;
+			parentPromptFilePath = tmp.filePath;
 		}
 
 		let wasAborted = false;
@@ -761,7 +793,15 @@ async function runSingleAgent(
 				// EOF, so unlike json -p print mode there is no deadlock.
 				// Orphan detection is heartbeat-based (see installChildWatchdog).
 				stdio: ["pipe", "pipe", "pipe"],
-				env: { ...process.env, PI_ORCHESTRATOR_CHILD: "1", PI_ORCHESTRATOR_BLOCKED_TOOLS: blockedTools.join(",") },
+				env: {
+					...process.env,
+					PI_ORCHESTRATOR_CHILD: "1",
+					PI_ORCHESTRATOR_BLOCKED_TOOLS: blockedTools.join(","),
+					// Only set when parent-prompt forwarding produced a file
+					// (config forwardParentPrompt; see installChildParentPrompt
+					// in index.ts).
+					...(parentPromptFilePath ? { PI_ORCHESTRATOR_PARENT_PROMPT_FILE: parentPromptFilePath } : {}),
+				},
 			});
 			liveProcs.add(proc);
 			// Swallow EPIPE: the child may die before/while we write a command.
@@ -996,6 +1036,18 @@ async function runSingleAgent(
 		if (tmpPromptDir)
 			try {
 				fs.rmdirSync(tmpPromptDir);
+			} catch {
+				/* ignore */
+			}
+		if (parentPromptFilePath)
+			try {
+				fs.unlinkSync(parentPromptFilePath);
+			} catch {
+				/* ignore */
+			}
+		if (tmpParentPromptDir)
+			try {
+				fs.rmdirSync(tmpParentPromptDir);
 			} catch {
 				/* ignore */
 			}

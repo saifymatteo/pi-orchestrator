@@ -10,8 +10,10 @@
  *   3. A hard gate blocks any non-keep-list tool call with guidance to delegate.
  *
  * Child mode (PI_ORCHESTRATOR_CHILD=1): the extension self-disables and only
- * installs the orphan watchdog, plus the ADR-0007 tool gate when the parent
- * set PI_ORCHESTRATOR_BLOCKED_TOOLS (gate-only child mode).
+ * installs the orphan watchdog, the ADR-0007 tool gate when the parent
+ * set PI_ORCHESTRATOR_BLOCKED_TOOLS (gate-only child mode), and the
+ * parent-prompt forwarding hook when the parent set
+ * PI_ORCHESTRATOR_PARENT_PROMPT_FILE (config forwardParentPrompt).
  */
 
 import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
@@ -28,6 +30,7 @@ import {
 	type DiscoveredTool,
 	type OrchestratorConfig,
 } from "./config.ts";
+import * as fs from "node:fs";
 import { clearFleetWidget, hasRunningTasks, idleFleetWidgetLines, killAllFleet, registerDelegateTool, type DelegateDeps } from "./delegate.ts";
 import { buildPolicy } from "./policy.ts";
 import { truncateToWidth } from "./width.ts";
@@ -72,6 +75,46 @@ export function installChildToolGate(pi: any): void {
 				`Blocked by orchestrator policy: tool "${event.toolName}" matches blocked matcher "${matched}". ` +
 				`It will not execute. Use the remaining tools to complete the task.`,
 		};
+	});
+}
+
+/**
+ * Pure transformation: append the parent prompt at the END of the child's
+ * system prompt (after pi base, agent body, project_context, skills, and
+ * cwd). Exported for unit tests (tests/index.test.ts).
+ */
+export function withParentPrompt(systemPrompt: string | undefined, parentPrompt: string): string {
+	// Empty guard: an empty parent prompt appends nothing — returning the
+	// child's prompt unchanged avoids a dangling trailing blank line.
+	if (!parentPrompt) return systemPrompt ?? "";
+	return systemPrompt ? `${systemPrompt}\n\n${parentPrompt}` : parentPrompt;
+}
+
+/**
+ * Child-side parent-prompt forwarding (config `forwardParentPrompt`): the
+ * parent writes its pre-policy system prompt to a temp file and passes the
+ * path via PI_ORCHESTRATOR_PARENT_PROMPT_FILE; this hook appends it at the
+ * END of the child's system prompt (after project_context/skills/cwd) so the
+ * stable shared prefix — pi base, agent body, context, skills, cwd — is
+ * maximized for provider prompt-cache hits. Deterministic — the same
+ * (child prompt, parent prompt) pair always yields the same bytes, so the
+ * cache prefix stays stable across spawns. Fail-soft: with the env var
+ * unset nothing is installed; a failed file read is a silent pass-through so
+ * the child works without the forwarding.
+ */
+export function installChildParentPrompt(pi: any): void {
+	const promptFile = process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE;
+	if (!promptFile) return;
+
+	pi.on("before_agent_start", async (event: any) => {
+		let parentPrompt: string;
+		try {
+			parentPrompt = await fs.promises.readFile(promptFile, "utf-8");
+		} catch {
+			return undefined;
+		}
+		const finalPrompt = withParentPrompt(event.systemPrompt, parentPrompt);
+		return { systemPrompt: finalPrompt };
 	});
 }
 
@@ -146,6 +189,7 @@ export default function (pi: any) {
 	if (process.env.PI_ORCHESTRATOR_CHILD === "1") {
 		installChildWatchdog();
 		installChildToolGate(pi);
+		installChildParentPrompt(pi);
 		return;
 	}
 

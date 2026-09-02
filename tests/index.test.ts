@@ -6,8 +6,17 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
-import { buildDelegateDeps, installChildToolGate, parseBlockedToolsEnv } from "../index.ts";
+import {
+	buildDelegateDeps,
+	installChildParentPrompt,
+	installChildToolGate,
+	parseBlockedToolsEnv,
+	withParentPrompt,
+} from "../index.ts";
 import { DEFAULT_CONFIG, type OrchestratorConfig } from "../config.ts";
 
 test("parseBlockedToolsEnv: empty string → no matchers (gate not installed)", () => {
@@ -164,4 +173,53 @@ test("installChildToolGate: absent/empty env installs no handler", () => {
 	const pi = capturePi();
 	installChildToolGate(pi as any);
 	assert.equal(pi.handlers["tool_call"], undefined);
+});
+
+// ── Child parent-prompt forwarding (forwardParentPrompt) ───────────────
+
+test("withParentPrompt: appends the parent prompt with a blank-line separator", () => {
+	assert.equal(withParentPrompt("base prompt", "parent rules"), "base prompt\n\nparent rules");
+});
+
+test("withParentPrompt: falsy systemPrompt ⇒ parent prompt becomes the whole prompt", () => {
+	assert.equal(withParentPrompt(undefined, "parent rules"), "parent rules");
+	assert.equal(withParentPrompt("", "parent rules"), "parent rules");
+});
+
+test("installChildParentPrompt: unset env installs no handler", () => {
+	delete process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE;
+	const pi = capturePi();
+	installChildParentPrompt(pi as any);
+	assert.equal(pi.handlers["before_agent_start"], undefined);
+});
+
+test("installChildParentPrompt: set env appends the file contents at the END of the system prompt", async () => {
+	const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-orchestrator-test-"));
+	const promptFile = path.join(tmp, "parent.md");
+	await fs.promises.writeFile(promptFile, "parent rules", "utf-8");
+	process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE = promptFile;
+	try {
+		const pi = capturePi();
+		installChildParentPrompt(pi as any);
+		const handler = pi.handlers["before_agent_start"]?.[0];
+		assert.ok(handler, "forwarding handler should be installed");
+		const result = await handler({ systemPrompt: "base\nproject_context\nskills\ncwd" });
+		assert.deepEqual(result, { systemPrompt: "base\nproject_context\nskills\ncwd\n\nparent rules" });
+	} finally {
+		delete process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE;
+		await fs.promises.rm(tmp, { recursive: true, force: true });
+	}
+});
+
+test("installChildParentPrompt: unreadable file is a pass-through (undefined)", async () => {
+	process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE = path.join(os.tmpdir(), "pi-orchestrator-does-not-exist-xyz.md");
+	try {
+		const pi = capturePi();
+		installChildParentPrompt(pi as any);
+		const handler = pi.handlers["before_agent_start"]?.[0];
+		assert.ok(handler, "forwarding handler should be installed");
+		assert.equal(await handler({ systemPrompt: "base" }), undefined);
+	} finally {
+		delete process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE;
+	}
 });
