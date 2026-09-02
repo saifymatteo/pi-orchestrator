@@ -1,6 +1,6 @@
 {
   "name": "@saifymatteo/pi-orchestrator",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Simple agent orchestration for pi coding agent (pi.dev)",
   "publishConfig": {
     "access": "public"
