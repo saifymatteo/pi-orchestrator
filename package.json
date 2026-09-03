@@ -1,6 +1,6 @@
 {
   "name": "@saifymatteo/pi-orchestrator",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Simple agent orchestration for pi coding agent (pi.dev)",
   "publishConfig": {
     "access": "public"
@@ -10,10 +10,8 @@
     "pi-extension",
     "pi.dev",
     "pi",
-    "coding",
-    "agent",
-    "harness",
-    "subagent",
+    "pi-coding-agent",
+    "agents",
     "subagents",
     "orchestration",
     "orchestrator"
@@ -33,18 +31,18 @@
   },
   "license": "MIT",
   "author": "saifymatteo",
-  "type": "module",
-  "main": "index.ts",
   "directories": {
     "doc": "docs",
     "test": "tests"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-ai": ">=0.84.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.0",
+    "@earendil-works/pi-tui": ">=0.84.0",
+    "@earendil-works/pi-agent-core": ">=0.84.0"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.52"
   },
   "scripts": {
     "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts tests/index.test.ts"
