@@ -50,6 +50,12 @@ const PER_TASK_OUTPUT_CAP = 50 * 1024;
 const DEFAULT_MAX_TURNS = 50;
 /** Hard-kill grace margin past the soft-grace budget (ADR-0006). */
 const TURN_BUDGET_GRACE = 5;
+
+/** Max wait for one RPC command response during sub-session setup (ADR-0011).
+ *  get_state/new_session answered in <1s in probes; setup is best-effort and
+ *  must never delay a healthy spawn by more than this. */
+const RPC_SETUP_TIMEOUT_MS = 10_000;
+
 /** Stall watchdog default (ADR-0006): orchestrator.json `stallTimeoutMs`
  *  (via deps.getStallTimeoutMs) overrides this. */
 const DEFAULT_STALL_TIMEOUT_MS = 600_000;
@@ -348,6 +354,11 @@ interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
+	/** Persistent sub-session (ADR-0011): the child's pi session file and id,
+	 *  captured via RPC get_state before the task prompt. Undefined when
+	 *  persistence is off or the child died before session setup completed. */
+	sessionFile?: string;
+	sessionId?: string;
 }
 
 export interface SubagentDetails {
@@ -397,15 +408,27 @@ function isFailedResult(result: SingleResult): boolean {
 function getResultOutput(result: SingleResult): string {
 	// Budget-exhausted and stall-killed runs report the reason AND everything
 	// captured so far.
+	let output: string;
 	if (result.stopReason === "turn-budget-exhausted" || result.stopReason === "stall-timeout") {
 		const partial = getFinalOutput(result.messages);
 		const reason = result.errorMessage || "Run was killed";
-		return partial ? `${reason}\n\nPartial output:\n${partial}` : reason;
+		output = partial ? `${reason}\n\nPartial output:\n${partial}` : reason;
+	} else if (isFailedResult(result)) {
+		output = result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+	} else {
+		output = getFinalOutput(result.messages) || "(no output)";
 	}
-	if (isFailedResult(result)) {
-		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-	}
-	return getFinalOutput(result.messages) || "(no output)";
+	return withSessionNote(result, output);
+}
+
+/**
+ * Pointer to the child's persistent pi session (ADR-0011), appended to every
+ * returned result text — the parent can reference it (`delegate({action:
+ * "sessions"})` lists them all) or hand the path to another subagent (e.g. a
+ * reviewer resuming what a worker actually did). Omitted for ephemeral runs.
+ */
+function withSessionNote(result: SingleResult, text: string): string {
+	return result.sessionFile ? `${text}\n\nSubagent session: ${result.sessionFile}` : text;
 }
 
 function truncateParallelOutput(output: string): string {
@@ -587,8 +610,10 @@ export function expandBlockedToolsToNames(
 export function buildChildSpawnArgs(opts: {
 	model?: string;
 	/** Deterministic session id (stableSessionId) forwarded via pi's
-	 *  `--session-id`; works with --no-session (id lands in the in-memory
-	 *  SessionManager). */
+	 *  `--session-id`; ONLY used for ephemeral children (persistSessions off,
+	 *  where the in-memory SessionManager id stabilizes the prompt_cache_key).
+	 *  Persistent sub-sessions get a unique id per run — a shared id across
+	 *  concurrent same-agent spawns would point two writers at one file. */
 	sessionId?: string;
 	/** Only set when the child inherits dispatch config (agent frontmatter has
 	 *  no model — same rule as before this extraction). */
@@ -600,8 +625,15 @@ export function buildChildSpawnArgs(opts: {
 	/** Concrete tool names unregistered at spawn via `--exclude-tools`
 	 *  (ADR-0008) — already expanded from matchers via expandBlockedToolsToNames. */
 	excludeTools: string[];
+	/** Persistent sub-session (ADR-0011): omit `--no-session` so the child's
+	 *  transcript survives; pi creates the file lazily on first message. */
+	persistSessions?: boolean;
+	/** Directory for the persistent session (the parent's session dir, so
+	 *  sub-sessions of a session live in one place). Omitted → pi's default
+	 *  per-cwd sessions dir. */
+	sessionDir?: string;
 }): string[] {
-	const args: string[] = ["--mode", "rpc", "--no-session"];
+	const args: string[] = ["--mode", "rpc"];
 	if (opts.model) args.push("--model", opts.model);
 	if (opts.thinkingLevel) args.push("--thinking", opts.thinkingLevel);
 	if (opts.tools && opts.tools.length > 0) args.push("--tools", opts.tools.join(","));
@@ -610,7 +642,12 @@ export function buildChildSpawnArgs(opts: {
 		for (const ext of opts.extensions) args.push("-e", ext);
 	}
 	if (opts.excludeTools.length > 0) args.push("--exclude-tools", opts.excludeTools.join(","));
-	if (opts.sessionId) args.push("--session-id", opts.sessionId);
+	if (opts.persistSessions) {
+		if (opts.sessionDir) args.push("--session-dir", opts.sessionDir);
+	} else {
+		args.push("--no-session");
+		if (opts.sessionId) args.push("--session-id", opts.sessionId);
+	}
 	return args;
 }
 
@@ -627,6 +664,86 @@ export function stableSessionId(agentName: string, model: string | undefined): s
 		.update(`orchestrator:${agentName}:${model ?? "default"}`)
 		.digest("hex")
 		.slice(0, 32);
+}
+
+// ── Sub-session discovery (ADR-0011) ─────────────────────────────────────
+
+export interface SessionHeader {
+	id?: string;
+	timestamp?: string;
+	cwd?: string;
+	parentSession?: string;
+}
+
+/**
+ * Parse a session file's first line (the `session` header, session-format
+ * v3). Returns null for anything that is not a parseable session header.
+ */
+export function parseSessionHeader(line: string): SessionHeader | null {
+	try {
+		const parsed = JSON.parse(line);
+		if (parsed && typeof parsed === "object" && parsed.type === "session") return parsed as SessionHeader;
+	} catch {
+		/* not JSON */
+	}
+	return null;
+}
+
+/**
+ * Read just the first line of a session file without loading the whole file
+ * (child sessions can grow large). Returns null on any read/parse failure.
+ */
+export function readSessionHeader(filePath: string): SessionHeader | null {
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(filePath, "r");
+		const buffer = Buffer.alloc(4096);
+		const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+		const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n")[0];
+		return parseSessionHeader(firstLine);
+	} catch {
+		return null;
+	} finally {
+		if (fd !== undefined)
+			try {
+				fs.closeSync(fd);
+			} catch {
+				/* ignore */
+			}
+	}
+}
+
+export interface SubSessionInfo {
+	id?: string;
+	timestamp?: string;
+	file: string;
+}
+
+/**
+ * Find the sub-sessions of a parent session: every session file in `dir`
+ * whose header records `parentSession === parentSessionFile` (the link pi
+ * writes when the parent sends RPC `new_session {parentSession}` — session
+ * format v3). State-based like everything here: derived from disk, so it
+ * survives parent restarts and covers runs from previous parent sessions
+ * too. Sorted newest-first; files that vanish mid-scan are skipped.
+ */
+export function scanSubSessions(dir: string, parentSessionFile: string): SubSessionInfo[] {
+	let names: string[];
+	try {
+		names = fs.readdirSync(dir);
+	} catch {
+		return [];
+	}
+	const found: SubSessionInfo[] = [];
+	for (const name of names) {
+		if (!name.endsWith(".jsonl")) continue;
+		const filePath = path.join(dir, name);
+		const header = readSessionHeader(filePath);
+		if (header?.parentSession === parentSessionFile) {
+			found.push({ id: header.id, timestamp: header.timestamp, file: filePath });
+		}
+	}
+	return found.sort((a, b) => (b.timestamp ?? "").localeCompare(a.timestamp ?? ""));
 }
 
 // ── Running one subagent ────────────────────────────────────────────────────
@@ -664,6 +781,9 @@ async function runSingleAgent(
 	/** Dispatch mode for the fleet widget line (single/parallel/chain). */
 	fleetMode: RunningTask["mode"],
 	onFleetChange: () => void,
+	/** Sub-session policy (ADR-0011): whether the child keeps a persistent pi
+	 *  session and which parent session file to link it to. */
+	sessionOpts: { persist: boolean; parentSessionFile?: string | undefined },
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -684,9 +804,14 @@ async function runSingleAgent(
 
 	const inheritsDispatchConfig = !agent.model;
 	const model = agent.model ?? dispatchDefaults.model;
+	// ADR-0011: persistent sub-sessions are file-per-run — a deterministic id
+	// shared across concurrent same-agent spawns would point two writers at
+	// one JSONL, so the stable cache-shard id is only used for ephemeral runs.
+	const persistSessions = sessionOpts.persist;
+	const sessionDir = sessionOpts.parentSessionFile ? path.dirname(sessionOpts.parentSessionFile) : undefined;
 	const args = buildChildSpawnArgs({
 		model,
-		sessionId: stableSessionId(agent.name, model),
+		sessionId: persistSessions ? undefined : stableSessionId(agent.name, model),
 		thinkingLevel: inheritsDispatchConfig ? dispatchDefaults.thinkingLevel : undefined,
 		tools: agent.tools,
 		extensions,
@@ -695,6 +820,8 @@ async function runSingleAgent(
 		// the interception gate (PI_ORCHESTRATOR_BLOCKED_TOOLS env) stays as backstop
 		// for tools a divergent child loads that the parent cannot see.
 		excludeTools: expandBlockedToolsToNames(blockedTools, getAllTools()),
+		persistSessions,
+		sessionDir,
 	});
 
 	let tmpPromptDir: string | null = null;
@@ -852,6 +979,10 @@ async function runSingleAgent(
 			}, STALL_CHECK_INTERVAL_MS);
 			stallTimer.unref?.();
 
+			// Awaited RPC commands (sub-session setup): id → waiter. Responses
+			// resolve in processLine; close/error resolves everything with null.
+			const pendingResponses = new Map<string, (resp: any | null) => void>();
+
 			const processLine = (line: string) => {
 				// Every stdout line counts as activity — response lines, message
 				// deltas, tool events, even unparseable noise (ADR-0006).
@@ -868,6 +999,13 @@ async function runSingleAgent(
 				// acceptance → fail the run. Failures AFTER acceptance arrive
 				// through the normal event stream instead.
 				if (event.type === "response") {
+					// Awaited session-setup commands (get_state / new_session)
+					// resolve their waiters here; unknown ids are ignored.
+					const waiter = pendingResponses.get(event.id);
+					if (waiter) {
+						pendingResponses.delete(event.id);
+						waiter(event);
+					}
 					if (event.id === "init" && event.success === false) {
 						stopStallWatchdog();
 						currentResult.stopReason = "error";
@@ -992,11 +1130,17 @@ async function runSingleAgent(
 
 			proc.on("close", (code) => {
 				cleanup();
+				// Unblock any session-setup waiters — the child is gone, so their
+				// responses will never arrive. resolve(null) skips the link.
+				for (const waiter of pendingResponses.values()) waiter(null);
+				pendingResponses.clear();
 				resolve(code ?? 0);
 			});
 
 			proc.on("error", () => {
 				cleanup();
+				for (const waiter of pendingResponses.values()) waiter(null);
+				pendingResponses.clear();
 				resolve(1);
 			});
 
@@ -1020,9 +1164,63 @@ async function runSingleAgent(
 				else signal.addEventListener("abort", killProc, { once: true });
 			}
 
-			// Kick off the task. Sending via stdin is why stdin is a pipe; a
-			// rejected prompt is failed via the "init" response above.
-			sendRpc(proc, { id: "init", type: "prompt", message: `Task: ${task}` });
+			// Sub-session setup (ADR-0011), best-effort and strictly ordered
+			// before the prompt: pi materializes the session file lazily on the
+			// first message, so issuing `new_session {parentSession}` here links
+			// the session the prompt lands in (parentSession lands in the v3
+			// header) and the abandoned startup session never touches disk.
+			// Failures/timeouts/cancellations skip the link; they never fail the
+			// run. No awaits in the executor itself — the sync executor must not
+			// become an async one.
+			const setupSubSession = async (): Promise<void> => {
+				const rpcCommand = (cmd: Record<string, unknown>, id: string): Promise<any | null> =>
+					new Promise((resolveCmd) => {
+						const timer = setTimeout(() => {
+							pendingResponses.delete(id);
+							resolve(null);
+						}, RPC_SETUP_TIMEOUT_MS);
+						timer.unref?.();
+						pendingResponses.set(id, (resp) => {
+							clearTimeout(timer);
+							resolve(resp);
+						});
+						sendRpc(proc, { id, ...cmd });
+					});
+				try {
+					const before = await rpcCommand({ type: "get_state" }, "sess-before");
+					if (before?.data?.sessionFile) {
+						currentResult.sessionId = before.data.sessionId;
+						currentResult.sessionFile = before.data.sessionFile;
+					}
+					if (sessionOpts.parentSessionFile) {
+						const resp = await rpcCommand(
+							{ type: "new_session", parentSession: sessionOpts.parentSessionFile },
+							"sess-link",
+						);
+						if (resp?.success && resp.data?.cancelled === false) {
+							const after = await rpcCommand({ type: "get_state" }, "sess-after");
+							if (after?.data?.sessionFile) {
+								currentResult.sessionId = after.data.sessionId;
+								currentResult.sessionFile = after.data.sessionFile;
+							}
+						}
+					}
+					sendRpc(proc, {
+						type: "set_session_name",
+						name: `orch: ${agent.name} — ${truncateWithEllipsis(task.replace(/\s+/g, " "), MAX_TASK_SUMMARY_CHARS)}`,
+					});
+				} catch {
+					/* best-effort: a dead child or malformed response just skips the link */
+				}
+			};
+
+			const sessionSetup = persistSessions ? setupSubSession() : Promise.resolve();
+			sessionSetup.finally(() => {
+				// Kick off the task once the session is linked. Sending via stdin
+				// is why stdin is a pipe; a rejected prompt is failed via the
+				// "init" response above.
+				if (!wasAborted) sendRpc(proc, { id: "init", type: "prompt", message: `Task: ${task}` });
+			});
 		});
 
 		currentResult.exitCode = exitCode;
@@ -1075,7 +1273,7 @@ export function agentNameParam(description: string, fleetNames: string[]) {
 }
 
 /**
- * Parameter schema for one fleet state. Rebuilt per registration so the Rebuilt per registration so the
+ * Parameter schema for one fleet state. Rebuilt per registration so the
  * `enum` on every agent-name field lists the agents discovered at extension
  * load (builtin + user + project for the session cwd).
  */
@@ -1083,8 +1281,9 @@ export function buildDelegateParams(fleetNames: string[]) {
 	return Type.Object({
 		action: Type.Optional(
 			Type.String({
-				enum: ["list"],
-				description: "Discovery action: pass exactly {action: 'list'} with no other params to get the current fleet (names, sources, tools, descriptions). Use this when unsure which agents exist.",
+				enum: ["list", "sessions"],
+				description:
+					"Discovery actions: pass exactly {action: 'list'} with no other params to get the current fleet (names, sources, tools, descriptions), or {action: 'sessions'} to list this session's persistent subagent sub-sessions. Use these when unsure which agents exist or which prior runs are on record.",
 			}),
 		),
 		agent: Type.Optional(agentNameParam("Agent name (single mode)", fleetNames)),
@@ -1141,6 +1340,14 @@ export interface DelegateDeps {
 	/** The parent's pre-policy system prompt, captured per turn by the
 	 *  before_agent_start hook. Undefined until captured (or in child mode). */
 	getParentPrompt?: () => string | undefined;
+	/** Persistent sub-sessions (orchestrator.json `childSessions`, ADR-0011).
+	 *  Falls back to true (sessions on). */
+	getChildSessions?: () => boolean;
+	/** The parent's own session file (ctx.sessionManager.getSessionFile()) —
+	 *  recorded in each child's header via RPC `new_session {parentSession}`
+	 *  and used to place child sessions in the parent's session dir.
+	 *  Undefined when the parent runs ephemeral (--no-session). */
+	getParentSessionFile?: (ctx: any) => string | undefined;
 }
 
 /**
@@ -1171,8 +1378,9 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 			"Delegate work to a fleet subagent with an isolated context and full tools. " +
 			"Modes: single ({agent, task}), parallel ({tasks: [{agent, task}]}, max 8), " +
 			"chain ({chain: [{agent, task}]}, sequential, {previous} placeholder inserts the prior step's output), " +
-			"discovery ({action: 'list'} returns the current fleet). " +
+			"discovery ({action: 'list'} returns the current fleet; {action: 'sessions'} lists this session's persistent subagent sub-sessions). " +
 			"Agent names must be exact fleet names — never invent one; when unsure, list first. " +
+			"Each dispatch returns a Subagent session path — the subagent's persistent pi transcript — that you can pass to another subagent for a deeper look. " +
 			"This is your only way to read, write, edit, search, or run commands.",
 		parameters: buildDelegateParams(fleetNames),
 
@@ -1189,6 +1397,40 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						{
 							type: "text",
 							text: `Fleet (agents available via delegate):\n${listing}`,
+						},
+					],
+					details: { mode: "single", results: [] },
+				};
+			}
+
+			// Sub-session listing (ADR-0011): every persistent child session
+			// linked to THIS parent session, derived from disk (header
+			// parentSession) — so it survives restarts/resumes and needs no
+			// in-memory bookkeeping. The parent can hand a sub-session file to
+			// another subagent (e.g. "review what the worker actually did:
+			// <file>") instead of trusting the compressed summary.
+			if (params?.action === "sessions") {
+				const parentSessionFile = deps.getParentSessionFile?.(ctx);
+				if (!parentSessionFile) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "Sub-session listing unavailable: the parent session is ephemeral (no session file).",
+							},
+						],
+						details: { mode: "single", results: [] },
+					};
+				}
+				const subs = scanSubSessions(path.dirname(parentSessionFile), parentSessionFile);
+				const listing =
+					subs.map((s) => `- ${s.timestamp ?? "(unknown time)"}  ${s.id ?? "(no id)"}\n  ${s.file}`).join("\n") ||
+					"(no sub-sessions recorded yet — they appear after a subagent's first message)";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Sub-sessions of this session (persistent subagent transcripts):\n${listing}`,
 						},
 					],
 					details: { mode: "single", results: [] },
@@ -1290,6 +1532,8 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 							makeDetails("chain"),
 							"chain",
 							fleetChanged,
+							// Sub-session policy (ADR-0011)
+							{ persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
 						);
 						results.push(result);
 
@@ -1307,7 +1551,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						content: [
 							{
 								type: "text",
-								text: withTouchedFiles(getFinalOutput(lastResult.messages) || "(no output)", lastResult.messages),
+								text: withTouchedFiles(withSessionNote(lastResult, getFinalOutput(lastResult.messages) || "(no output)"), lastResult.messages),
 							},
 						],
 						details: makeDetails("chain")(results),
@@ -1376,6 +1620,8 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 								makeDetails("parallel"),
 								"parallel",
 								fleetChanged,
+								// Sub-session policy (ADR-0011)
+								{ persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
 							);
 							allResults[index] = result;
 							emitParallelUpdate();
@@ -1420,6 +1666,8 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						makeDetails("single"),
 						"single",
 						fleetChanged,
+						// Sub-session policy (ADR-0011)
+						{ persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
 					);
 					if (isFailedResult(result)) {
 						return {
@@ -1440,7 +1688,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						content: [
 							{
 								type: "text",
-								text: withTouchedFiles(getFinalOutput(result.messages) || "(no output)", result.messages),
+								text: withTouchedFiles(withSessionNote(result, getFinalOutput(result.messages) || "(no output)"), result.messages),
 							},
 						],
 						details: makeDetails("single")([result]),

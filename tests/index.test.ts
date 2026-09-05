@@ -189,14 +189,20 @@ test("withParentPrompt: falsy systemPrompt ⇒ parent prompt becomes the whole p
 
 // ── Delta-forwarding (stripDuplicatedParentSegments) ───────────────────
 
+// OS-neutral synthetic cwd values — these fixtures are prompt *text*; the
+// stripper only compares the full "Current working directory: …" line
+// verbatim, so any path works as long as both sides agree.
+const FAKE_CWD = path.join(os.tmpdir(), "repo-x");
+const FAKE_CWD_OTHER = path.join(os.tmpdir(), "repo-other");
+
 const CHILD_WITH_DUPES =
 	"base\n\n<project_context>\nAGENTS.md content\n</project_context>\n\n" +
-	"Current working directory: D:/Git/x\n\nToolbelt: 4 tools";
+	`Current working directory: ${FAKE_CWD}\n\nToolbelt: 4 tools`;
 
 const PARENT_WITH_DUPES =
 	"Available tools:\n- recall\n\n" +
 	"<project_context>\nAGENTS.md content\n</project_context>\n\n" +
-	"Current working directory: D:/Git/x\n\n" +
+	`Current working directory: ${FAKE_CWD}\n\n` +
 	"Toolbelt: 36 tools\n\nCodeGraph tools are available.";
 
 const PARENT_STRIPPED =
@@ -216,7 +222,7 @@ test("stripDuplicatedParentSegments: deterministic — same inputs, same output 
 test("stripDuplicatedParentSegments: keeps segments NOT present in the child's prompt (per-task cwd override)", () => {
 	const childOtherCwd =
 		"base\n\n<project_context>\nOTHER repo AGENTS.md\n</project_context>\n\n" +
-		"Current working directory: D:/Other\n\nToolbelt: 4 tools";
+		`Current working directory: ${FAKE_CWD_OTHER}\n\nToolbelt: 4 tools`;
 	// Neither the parent's project_context block nor its cwd line appears in
 	// the child's prompt ⇒ both must survive untouched.
 	assert.equal(stripDuplicatedParentSegments(childOtherCwd, PARENT_WITH_DUPES), PARENT_WITH_DUPES);

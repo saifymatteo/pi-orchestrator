@@ -53,6 +53,13 @@ export interface OrchestratorConfig {
 	 *  activity resets it; a child silent for this long is hard-killed. Any
 	 *  positive number (no disable switch — use a huge value instead). */
 	stallTimeoutMs: number;
+	/** Persistent sub-sessions (ADR-0011). When true (default), each child run
+	 *  keeps a pi session file — written next to the parent's session, named
+	 *  `orch: <agent> — <task>`, and linked to the parent session via pi's
+	 *  parentSession header — so the transcript survives for reference
+	 *  (`delegate({action: "sessions"})` lists them). false restores
+	 *  ephemeral children (--no-session). */
+	childSessions: boolean;
 }
 
 export const DEFAULT_CONFIG: OrchestratorConfig = {
@@ -65,6 +72,7 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
 	modelOverrides: {},
 	maxTurns: 50,
 	stallTimeoutMs: 600_000,
+	childSessions: true,
 };
 
 export function getConfigPath(): string {
@@ -98,6 +106,8 @@ export function loadConfig(): OrchestratorConfig {
 						)
 					: {},
 			maxTurns: parseMaxTurns(raw.maxTurns) ?? DEFAULT_CONFIG.maxTurns,
+			childSessions:
+				typeof raw.childSessions === "boolean" ? raw.childSessions : DEFAULT_CONFIG.childSessions,
 			stallTimeoutMs: parseStallTimeoutMs(raw.stallTimeoutMs) ?? DEFAULT_CONFIG.stallTimeoutMs,
 		};
 	} catch {

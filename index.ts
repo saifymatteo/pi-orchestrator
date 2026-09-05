@@ -263,6 +263,19 @@ export function buildDelegateDeps(getConfig: () => OrchestratorConfig, onIdle: (
 		// by the before_agent_start hook below.
 		getForwardParentPrompt: () => getConfig().forwardParentPrompt,
 		getParentPrompt: () => parentSystemPrompt,
+		// Persistent sub-sessions (ADR-0011): the parent's own session file is
+		// recorded in each child's session header (RPC new_session parentSession)
+		// and child sessions are placed in the parent's session dir, so all
+		// sub-sessions of a session live together and delegate({action:
+		// "sessions"}) can list them. Undefined when the parent runs ephemeral.
+		getChildSessions: () => getConfig().childSessions,
+		getParentSessionFile: (ctx: any) => {
+			try {
+				return ctx?.sessionManager?.getSessionFile?.() ?? undefined;
+			} catch {
+				return undefined;
+			}
+		},
 		onIdle,
 	};
 }

@@ -40,7 +40,7 @@ pi -e <path-to-your-clone>/pi-orchestrator/index.ts
 | Policy | `before_agent_start` appends a delegation policy every turn, generated from the discovered fleet and the tools actually kept (ADR-0004) |
 | Reduction | `setActiveTools` keeps only the keep-list (re-applied every turn to catch late-registered tools) |
 | Gate | `tool_call` blocks anything not on the keep-list, with guidance to delegate (ADR-0001) |
-| Delegate tool | spawns `pi --mode rpc --no-session` children with `PI_ORCHESTRATOR_CHILD=1` (ADR-0002) |
+| Delegate tool | spawns `pi --mode rpc` children with `PI_ORCHESTRATOR_CHILD=1` (ADR-0002); persistent sub-sessions by default — file-per-run in the parent's session dir, linked via `new_session {parentSession}` (ADR-0011) |
 | Turn budget | soft-grace steer at the budget, hard kill at budget + 5 turns (ADR-0006) |
 | Stall watchdog | hard-kills a child silent for `stallTimeoutMs` (default 10 min); any output resets it (ADR-0006) |
 | Child mode | children self-disable this extension; a parent-PID heartbeat watchdog exits them if pi dies |
@@ -49,7 +49,7 @@ pi -e <path-to-your-clone>/pi-orchestrator/index.ts
 
 Child success is state-based (the RPC `agent_settled` event); child exit codes are informational only, since settled children are SIGTERMed by design.
 
-`delegate` takes three dispatch shapes: `{agent, task}` for a single job, `tasks[]` (max 8, concurrency 4) for independent parallel work, and `chain[]` with a `{previous}` placeholder for dependent steps — plus a discovery shape, `{action: "list"}`, which returns the live fleet (names, sources, tools, descriptions) without spawning anything.
+`delegate` takes three dispatch shapes: `{agent, task}` for a single job, `tasks[]` (max 8, concurrency 4) for independent parallel work, and `chain[]` with a `{previous}` placeholder for dependent steps — plus two discovery shapes: `{action: "list"}` returns the live fleet (names, sources, tools, descriptions) and `{action: "sessions"}` lists the current session's persistent subagent transcripts, both without spawning anything.
 
 Agent names are discoverable before the first call: every `agent` field in the tool schema carries a JSON-Schema `enum` of the fleet discovered at extension load (fallback: free-form when the fleet is empty), so models pick from real names instead of inventing plausible ones. The `list` action and the `Unknown agent: ... Available agents: ...` error always reflect the fleet as of right now, including agents added mid-session.
 
@@ -62,6 +62,7 @@ Agent names are discoverable before the first call: every `agent` field in the t
   "childBlockedTools": [],
   "childExtensions": [],
   "forwardParentPrompt": true,
+  "childSessions": true,
   "builtinFleet": true,
   "modelOverrides": {},
   "maxTurns": 50,
@@ -116,6 +117,17 @@ Note: to keep the child-side tool gate and orphan watchdog alive in isolated chi
 ### `forwardParentPrompt` (boolean, default `true`)
 
 When `true`, every subagent gets the orchestrator parent's pre-policy system prompt appended at the **END** of its system prompt (after pi's base prompt, the agent body, project context, skills, and cwd). The forwarding is done child-side: the parent writes the prompt to a temp file and passes its path via `PI_ORCHESTRATOR_PARENT_PROMPT_FILE`; a child-side `before_agent_start` hook appends it last. This ordering maximizes the stable shared prefix (base, context, skills, cwd) across children, which improves provider prompt-cache hit rates — only the task-specific tail differs. The appended prompt carries installed extensions' promptGuidelines — e.g. CodeGraph's tool usage guidance, which is injected into the parent's prompt — into subagents, so they use those tools effectively. Before appending, the hook **delta-strips** the segments the child already receives verbatim through its own prompt assembly — the `<project_context>` block, the `Current working directory:` line, and the `## Agent skills` section (only when the parent's entire skills slice appears verbatim in the child's prompt) — so they are not paid for twice; a segment is only removed when it appears byte-identical in the child's own prompt (so a per-task `cwd` override keeps the forwarded copy intact). Set to `false` to keep subagent prompts minimal (agent body + tool-policy hint only; no file or env var is set).
+
+### `childSessions` (boolean, default `true`)
+
+Persistent sub-sessions (ADR-0011). When `true`, every subagent keeps a persistent pi session instead of running ephemeral: the child is spawned without `--no-session` and with `--session-dir` pointing at the **parent's session directory**, so all sub-sessions of a session live in one place; the parent then links the child via RPC `new_session {parentSession}` before the task prompt, which pi records in the child's session header (session-format v3 `parentSession`), and names the session `orch: <agent> — <task-summary>` so it is findable in `/resume` (filter named sessions with Ctrl+N). Effects:
+
+- Every `delegate` result text ends with `Subagent session: <path>` — the subagent's full transcript on disk (task, tool calls, readings), not just the compressed summary that came back.
+- The transcript survives **everything**: normal completion, turn-budget hard kill, stall kill, aborts, and parent death. A killed child's partial work stays inspectable.
+- `delegate({action: "sessions"})` lists the current parent session's sub-sessions (newest first), derived from the on-disk headers — no in-memory state, so it works after restarts/resumes.
+- Sessions are **file-per-run**: two concurrent runs of the same agent never share a JSONL. The deterministic per-(agent, model) session id is only used for ephemeral runs (it stabilizes the OpenAI-compat `prompt_cache_key`; persistent runs get a fresh id per file). Sessions are created lazily by pi — a child killed before its first message leaves no file.
+
+Set to `false` to restore ephemeral children (`--no-session`). Note that a child spawned with a per-task `cwd` override still writes into the parent's session dir (the link is by parent session, not by cwd), and pi's `/resume` picker for the project will list named `orch: ...` sessions alongside human sessions.
 
 ### `builtinFleet` (boolean, default `true`)
 

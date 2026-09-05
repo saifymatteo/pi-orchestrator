@@ -80,6 +80,7 @@ test("loadConfig: missing file yields full defaults", () => {
 			modelOverrides: {},
 			maxTurns: 50,
 			stallTimeoutMs: 600000,
+			childSessions: true,
 		});
 	});
 });
@@ -178,7 +179,10 @@ test("toolMatchesAnyMatcher: returns the first matching matcher", () => {
 // ── discoverKeptTools ───────────────────────────────────────────────────────
 
 const tool = (name, sourceInfo) => ({ name, sourceInfo });
-const nm = (pkg, rest) => ({ path: `C:/repo/node_modules/${pkg}/${rest}` });
+// Synthetic extension paths rooted at the OS temp dir — the derivation only
+// reads the node_modules segment structure and the file basename.
+const nm = (pkg, rest) => ({ path: path.join(os.tmpdir(), "repo", "node_modules", pkg, rest) });
+const extPath = (file) => path.join(os.tmpdir(), "ext", file);
 
 test("discoverKeptTools: skips builtin, delegate, and unknown (no sourceInfo) tools", () => {
 	const discovered = discoverKeptTools(
@@ -211,13 +215,13 @@ test("discoverKeptTools: groups tools by extensionId and dedupes names", () => {
 });
 
 test("discoverKeptTools: unscoped single-segment paths become their own extension", () => {
-	const discovered = discoverKeptTools([tool("x", { path: "C:/ext/my-ext.ts" })], []);
+	const discovered = discoverKeptTools([tool("x", { path: extPath("my-ext.ts") })], []);
 	assert.deepEqual(discovered, [{ extensionId: "my-ext", names: ["x"], partial: false }]);
 });
 
 test("discoverKeptTools: extension tool shadowing a builtin name is excluded (registerTool strips <builtin:> sourceInfo)", () => {
 	const discovered = discoverKeptTools(
-		[tool("bash", { path: "C:/ext/compact-tools.ts" }), tool("my_custom_thing", { path: "C:/ext/compact-tools.ts" })],
+		[tool("bash", { path: extPath("compact-tools.ts") }), tool("my_custom_thing", { path: extPath("compact-tools.ts") })],
 		[],
 	);
 	// "bash" is skipped; only the non-colliding tool survives, under its own
@@ -252,7 +256,7 @@ test("discoverKeptTools: builtin-shaped tools stay excluded even with ext: confi
 });
 
 test("discoverKeptTools: builtin-shadow exclusion is case-insensitive on tool name", () => {
-	const discovered = discoverKeptTools([tool("Bash", { path: "C:/ext/compact-tools.ts" })], []);
+	const discovered = discoverKeptTools([tool("Bash", { path: extPath("compact-tools.ts") })], []);
 	assert.deepEqual(discovered, []);
 });
 

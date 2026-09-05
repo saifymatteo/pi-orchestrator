@@ -9,10 +9,18 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as fs from "node:fs";
 
 import { idleFleetWidgetLines, renderFleetLines } from "../delegate.ts";
 import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId } from "../delegate.ts";
 import { buildChildSpawnArgs, expandBlockedToolsToNames, stableSessionId } from "../delegate.ts";
+
+// Provider-neutral model placeholders and OS-native synthetic paths — the
+// tests must not depend on any concrete model registry or drive letters.
+const TEST_MODEL = "test/model";
+const TEST_MODEL_ALT = "test/other-model";
 
 /** Minimal RunningTask-shaped fixture (mode is the only other required field).
  *  toolTurns defaults to turns (1); tests that need a mismatch override it. */
@@ -327,23 +335,44 @@ test("formatTouchedFiles: empty input returns empty string", () => {
 // ── Child spawn args (ADR-0008) ─────────────────────────────────────────────
 
 test("buildChildSpawnArgs: base RPC args are always present, in order", () => {
-	assert.deepEqual(buildChildSpawnArgs({ extensions: [], excludeTools: [] }), [
-		"--mode",
-		"rpc",
-		"--no-session",
-	]);
+	assert.deepEqual(buildChildSpawnArgs({ extensions: [], excludeTools: [] }), ["--mode", "rpc", "--no-session"]);
+});
+
+test("buildChildSpawnArgs: ephemeral child keeps --no-session plus the deterministic id (cache-shard stability)", () => {
+	const args = buildChildSpawnArgs({ extensions: [], excludeTools: [], persistSessions: false, sessionId: "abc123" });
+	assert.deepEqual(args.slice(-3), ["--no-session", "--session-id", "abc123"]);
+});
+
+test("buildChildSpawnArgs: persistent child keeps a session and points it at the parent's session dir", () => {
+	const sessionDir = path.join(os.tmpdir(), "proj", ".pi-sessions");
+	const args = buildChildSpawnArgs({
+		model: TEST_MODEL,
+		extensions: [],
+		excludeTools: ["advisor"],
+		persistSessions: true,
+		sessionDir,
+	});
+	assert.ok(!args.includes("--no-session"), "persistent children must not pass --no-session");
+	assert.ok(!args.includes("--session-id"), "file-per-run: no deterministic shared id (two writers on one JSONL)");
+	assert.deepEqual(args.slice(args.indexOf("--session-dir")), ["--session-dir", sessionDir]);
+});
+
+test("buildChildSpawnArgs: persistent child without a parent session uses pi's default dir", () => {
+	const args = buildChildSpawnArgs({ extensions: [], excludeTools: [], persistSessions: true });
+	assert.ok(!args.includes("--session-dir"));
+	assert.ok(!args.includes("--no-session"));
 });
 
 test("buildChildSpawnArgs: model, thinking, and per-agent tools join the front", () => {
 	assert.deepEqual(
 		buildChildSpawnArgs({
-			model: "openrouter/cheap",
+			model: TEST_MODEL,
 			thinkingLevel: "high",
 			tools: ["read", "grep"],
 			extensions: [],
 			excludeTools: [],
 		}),
-		["--mode", "rpc", "--no-session", "--model", "openrouter/cheap", "--thinking", "high", "--tools", "read,grep"],
+		["--mode", "rpc", "--model", TEST_MODEL, "--thinking", "high", "--tools", "read,grep", "--no-session"],
 	);
 });
 
@@ -365,7 +394,8 @@ test("buildChildSpawnArgs: non-empty extensions ⇒ --no-extensions plus one -e 
 		extensions: ["./my-ext.ts", "npm:@foo/bar"],
 		excludeTools: [],
 	});
-	assert.deepEqual(args.slice(args.indexOf("--no-extensions")), [
+	const start = args.indexOf("--no-extensions");
+	assert.deepEqual(args.slice(start, start + 5), [
 		"--no-extensions",
 		"-e",
 		"./my-ext.ts",
@@ -374,9 +404,12 @@ test("buildChildSpawnArgs: non-empty extensions ⇒ --no-extensions plus one -e 
 	]);
 });
 
+// ── Persistent sub-session spawn args (ADR-0011) ──────────────────────────
+
 test("buildChildSpawnArgs: excludeTools becomes one comma-joined --exclude-tools flag (pi docs: comma-separated denylist)", () => {
-	const args = buildChildSpawnArgs({ extensions: [], excludeTools: ["advisor", "history_cleanup"] });
-	assert.deepEqual(args.slice(-2), ["--exclude-tools", "advisor,history_cleanup"]);
+	const args = buildChildSpawnArgs({ extensions: [], excludeTools: ["advisor", "history_cleanup"], persistSessions: false });
+	const i = args.indexOf("--exclude-tools");
+	assert.deepEqual(args.slice(i, i + 2), ["--exclude-tools", "advisor,history_cleanup"]);
 	assert.equal(args.filter((a) => a === "--exclude-tools").length, 1, "flag must not repeat");
 
 	// Empty list → flag omitted entirely (the interception gate handles it).
@@ -400,18 +433,18 @@ test("buildChildSpawnArgs: sessionId omitted ⇒ no --session-id flag", () => {
 });
 
 test("stableSessionId: deterministic across calls (same inputs → same output)", () => {
-	assert.equal(stableSessionId("scout", "openrouter/cheap"), stableSessionId("scout", "openrouter/cheap"));
+	assert.equal(stableSessionId("scout", TEST_MODEL), stableSessionId("scout", TEST_MODEL));
 	assert.equal(stableSessionId("worker", undefined), stableSessionId("worker", undefined));
 });
 
 test("stableSessionId: differs per agent name and per model", () => {
-	assert.notEqual(stableSessionId("scout", "openrouter/cheap"), stableSessionId("worker", "openrouter/cheap"));
-	assert.notEqual(stableSessionId("scout", "openrouter/cheap"), stableSessionId("scout", "openrouter/premium"));
+	assert.notEqual(stableSessionId("scout", TEST_MODEL), stableSessionId("worker", TEST_MODEL));
+	assert.notEqual(stableSessionId("scout", TEST_MODEL), stableSessionId("scout", TEST_MODEL_ALT));
 });
 
 test("stableSessionId: output matches pi's assertValidSessionId format", () => {
 	for (const id of [
-		stableSessionId("scout", "openrouter/cheap"),
+		stableSessionId("scout", TEST_MODEL),
 		stableSessionId("a-very_long.agent-name", undefined),
 	]) {
 		assert.match(id, SESSION_ID_RE);
@@ -422,7 +455,7 @@ test("stableSessionId: output matches pi's assertValidSessionId format", () => {
 // ── expandBlockedToolsToNames (ADR-0008) ──────────────────────────────────
 
 const tool = (name: string, sourceInfo?: unknown) => ({ name, sourceInfo });
-const nm = (pkg: string, rest: string) => ({ path: `C:/repo/node_modules/${pkg}/${rest}` });
+const nm = (pkg: string, rest: string) => ({ path: path.join(os.tmpdir(), "repo", "node_modules", pkg, rest) });
 
 test("expandBlockedToolsToNames: exact match (case-insensitive) resolves to the tool name", () => {
 	const tools = [tool("advisor", nm("@l/advisor", "i.js")), tool("todo", undefined)];
@@ -507,9 +540,9 @@ test("buildDelegateParams: empty fleet omits the enum (free-form, no empty-enum 
 	}
 });
 
-test("buildDelegateParams: discovery action is enum-constrained to 'list'", () => {
+test("buildDelegateParams: discovery action is enum-constrained to list/sessions", () => {
 	const params = buildDelegateParams(FLEET);
-	assert.deepEqual(params.properties.action.enum, ["list"]);
+	assert.deepEqual(params.properties.action.enum, ["list", "sessions"]);
 });
 
 test("agentNameParam: description carries the valid names so models without enum support still see them", () => {
@@ -535,7 +568,7 @@ const populatedDelegateTool: any = (() => {
 					name: "worker",
 					description: "General-purpose implementation agent",
 					source: "project",
-					model: "anthropic/claude-sonnet-4",
+					model: TEST_MODEL,
 					maxTurns: 20,
 				},
 			],
@@ -569,7 +602,12 @@ test("list action returns the live fleet without spawning any subagent", async (
 	const text = out.content[0].text as string;
 	assert.match(text, /Fleet \(agents available via delegate\)/);
 	assert.match(text, /- \*\*scout\*\* \(builtin, tools: read, grep\): Fast read-only codebase recon/);
-	assert.match(text, /- \*\*worker\*\* \(project, full tools, model: anthropic\/claude-sonnet-4, maxTurns: 20\): General-purpose implementation agent/);
+	assert.match(
+		text,
+		new RegExp(
+			`- \\*\\*worker\\*\\* \\(project, full tools, model: ${TEST_MODEL}, maxTurns: 20\\): General-purpose implementation agent`,
+		),
+	);
 	assert.equal(out.details.results.length, 0);
 });
 
@@ -592,4 +630,138 @@ test("list action on an empty fleet reports an empty fleet", async () => {
 	);
 	const out = await captured.execute("call-1", { action: "list" }, undefined, undefined, {});
 	assert.match(out.content[0].text, /fleet is empty/);
+});
+
+// ── Sub-session discovery (ADR-0011) ───────────────────────────────────────
+
+import { parseSessionHeader, readSessionHeader, scanSubSessions } from "../delegate.ts";
+
+test("parseSessionHeader: accepts the v3 session header, rejects everything else", () => {
+	const header = parseSessionHeader(
+		`{"type":"session","version":3,"id":"abc","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/p","parentSession":"/p/parent.jsonl"}`,
+	);
+	assert.equal(header?.parentSession, "/p/parent.jsonl");
+	assert.equal(header?.id, "abc");
+	assert.equal(parseSessionHeader(`{"type":"message","id":"x"}`), null, "non-session entry");
+	assert.equal(parseSessionHeader(`not json`), null);
+	assert.equal(parseSessionHeader(``), null);
+});
+
+test("readSessionHeader: reads only the first line, tolerant of long bodies and missing files", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orch-sess-"));
+	try {
+		const file = path.join(dir, "child.jsonl");
+		fs.writeFileSync(
+			file,
+			`{"type":"session","version":3,"id":"s1","cwd":"/w","parentSession":"PARENT"}\n` +
+				`{"type":"message","id":"m1","message":{"role":"user"}}\n`.repeat(200),
+		);
+		const header = readSessionHeader(file);
+		assert.equal(header?.parentSession, "PARENT");
+		assert.equal(readSessionHeader(path.join(dir, "missing.jsonl")), null);
+		const notSession = path.join(dir, "other.jsonl");
+		fs.writeFileSync(notSession, `{"type":"message"}\n`);
+		assert.equal(readSessionHeader(notSession), null);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("scanSubSessions: returns only sessions whose header links the parent, newest first", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orch-scan-"));
+	const parent = path.join(dir, "parent.jsonl");
+	try {
+		const write = (name: string, parentSession?: string, timestamp?: string) =>
+			fs.writeFileSync(
+				path.join(dir, name),
+				JSON.stringify({ type: "session", version: 3, id: name, cwd: dir, timestamp, parentSession }) + "\n",
+			);
+		write("a-old.jsonl", parent, "2026-01-01T00:00:00.000Z");
+		write("b-new.jsonl", parent, "2026-01-02T00:00:00.000Z");
+		write("c-unlinked.jsonl", undefined, "2026-01-03T00:00:00.000Z"); // not ours
+		write("d-other-parent.jsonl", "/elsewhere/parent.jsonl", "2026-01-03T00:00:00.000Z");
+		fs.writeFileSync(path.join(dir, "notes.txt"), "not a session");
+		fs.mkdirSync(path.join(dir, "subdir.jsonl")); // directory with .jsonl name
+
+		const subs = scanSubSessions(dir, parent);
+		assert.deepEqual(
+			subs.map((s) => s.id),
+			["b-new.jsonl", "a-old.jsonl"],
+			"only linked sessions, newest first",
+		);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("scanSubSessions: missing directory ⇒ []", () => {
+	assert.deepEqual(scanSubSessions(path.join(os.tmpdir(), "orch-nope-xyz"), "P"), []);
+});
+
+// ── The `sessions` action (ADR-0011) ─────────────────────────────────────
+
+const sessionsTool: any = (() => {
+	let captured: any;
+	registerDelegateTool(
+		{ registerTool: (t: any) => (captured = t) } as any,
+		{
+			getAgents: () => [],
+			getDispatchDefaults: () => ({}),
+			getCwd: () => process.cwd(),
+			getSignal: () => undefined,
+			onIdle: () => {},
+			getParentSessionFile: () => "PARENT",
+		},
+	);
+	return captured;
+})();
+
+test("sessions action lists the parent's linked child sessions", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orch-sessions-action-"));
+	try {
+		// The parent session file must exist for path.dirname() to give the scan dir.
+		const parentFile = path.join(dir, "parent.jsonl");
+		fs.writeFileSync(parentFile, "{}\n");
+		const child = path.join(dir, "child.jsonl");
+		fs.writeFileSync(
+			child,
+			JSON.stringify({ type: "session", version: 3, id: "kid-1", timestamp: "2026-01-02T00:00:00.000Z", parentSession: parentFile }),
+		);
+		let captured: any;
+		registerDelegateTool(
+			{ registerTool: (t: any) => (captured = t) } as any,
+			{
+				getAgents: () => [],
+				getDispatchDefaults: () => ({}),
+				getCwd: () => process.cwd(),
+				getSignal: () => undefined,
+				onIdle: () => {},
+				getParentSessionFile: () => parentFile,
+			},
+		);
+		const out = await captured.execute("call-1", { action: "sessions" }, undefined, undefined, {});
+		const text = out.content[0].text as string;
+		assert.match(text, /Sub-sessions of this session/);
+		assert.match(text, /kid-1/);
+		assert.match(text, /child\.jsonl/);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("sessions action with no parent session file degrades gracefully", async () => {
+	let captured: any;
+	registerDelegateTool(
+		{ registerTool: (t: any) => (captured = t) } as any,
+		{
+			getAgents: () => [],
+			getDispatchDefaults: () => ({}),
+			getCwd: () => process.cwd(),
+			getSignal: () => undefined,
+			onIdle: () => {},
+			getParentSessionFile: () => undefined,
+		},
+	);
+	const out = await captured.execute("call-1", { action: "sessions" }, undefined, undefined, {});
+	assert.match(out.content[0].text, /ephemeral/);
 });
