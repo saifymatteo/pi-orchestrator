@@ -14,7 +14,7 @@ A subagent: a fresh child `pi` process with an isolated context window and the f
 The set of agent definitions the Orchestrator can delegate to. Shipped fleet: **scout** (read-only recon), **planner** (read-only planning), **worker** (general-purpose, full tools), **reviewer** (read-only + shell, code review). Builtins ship as markdown files with YAML frontmatter in the extension's own `agents/` directory; user-installed agents live in `~/.pi/agent/agents/`.
 
 ### Delegate (tool)
-The single tool the Orchestrator uses to hand work to the Fleet. Modes: single (`agent` + `task`), parallel (`tasks[]`), chain (`chain[]` with `{previous}` placeholder). Always active, never blocked.
+The single tool the Orchestrator uses to hand work to the Fleet. Modes: single (`agent` + `task`), parallel (`tasks[]`), chain (`chain[]` with `{previous}` placeholder), discovery (`{action: "list"}` returns the live fleet without spawning anything). Agent names are published as a schema enum of the fleet discovered at load (see ADR-0010). Always active, never blocked.
 
 ### Engagement
 Whether orchestration mode is active for a session. When engaged: the delegation policy is injected every turn, and the Orchestrator's tools are reduced to the Keep-list. When disengaged: pi behaves normally. The `/orchestrator` command toggles engagement persistently (see ADR-0003).

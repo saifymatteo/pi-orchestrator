@@ -473,3 +473,123 @@ test("expandBlockedToolsToNames: empty matchers ⇒ []", () => {
 	const tools = [tool("advisor", nm("x", "i.js")), tool("todo", undefined)];
 	assert.deepEqual(expandBlockedToolsToNames([], tools), []);
 });
+
+// ── Fleet enum in the tool schema (first-turn agent-name mangle fix) ────────
+
+import { agentNameParam, buildDelegateParams } from "../delegate.ts";
+
+const FLEET = ["planner", "reviewer", "scout", "worker"];
+
+function agentSchemaOf(params: any): any {
+	return params.properties.agent;
+}
+
+function taskItemAgentSchemaOf(params: any): any {
+	return params.properties.tasks.items.properties.agent;
+}
+
+function chainStepAgentSchemaOf(params: any): any {
+	return params.properties.chain.items.properties.agent;
+}
+
+test("buildDelegateParams: non-empty fleet publishes an enum on every agent-name field", () => {
+	const params = buildDelegateParams(FLEET);
+	for (const schema of [agentSchemaOf(params), taskItemAgentSchemaOf(params), chainStepAgentSchemaOf(params)]) {
+		assert.deepEqual(schema.enum, FLEET);
+		assert.ok(schema.description.includes("planner, reviewer, scout, worker"), schema.description);
+	}
+});
+
+test("buildDelegateParams: empty fleet omits the enum (free-form, no empty-enum trap)", () => {
+	const params = buildDelegateParams([]);
+	for (const schema of [agentSchemaOf(params), taskItemAgentSchemaOf(params), chainStepAgentSchemaOf(params)]) {
+		assert.equal(schema.enum, undefined);
+	}
+});
+
+test("buildDelegateParams: discovery action is enum-constrained to 'list'", () => {
+	const params = buildDelegateParams(FLEET);
+	assert.deepEqual(params.properties.action.enum, ["list"]);
+});
+
+test("agentNameParam: description carries the valid names so models without enum support still see them", () => {
+	const schema = agentNameParam("Agent name (single mode)", FLEET);
+	assert.match(schema.description, /Valid names: planner, reviewer, scout, worker\./);
+});
+
+// ── The registered tool: schema + list action ───────────────────────────────
+
+const populatedDelegateTool: any = (() => {
+	let captured: any;
+	registerDelegateTool(
+		{ registerTool: (t: any) => (captured = t) } as any,
+		{
+			getAgents: () => [
+				{
+					name: "scout",
+					description: "Fast read-only codebase recon",
+					tools: ["read", "grep"],
+					source: "builtin",
+				},
+				{
+					name: "worker",
+					description: "General-purpose implementation agent",
+					source: "project",
+					model: "anthropic/claude-sonnet-4",
+					maxTurns: 20,
+				},
+			],
+			getDispatchDefaults: () => ({}),
+			getCwd: () => process.cwd(),
+			getSignal: () => undefined,
+			onIdle: () => {},
+		},
+	);
+	return captured;
+})();
+
+async function executeDelegate(params: any): Promise<any> {
+	return await populatedDelegateTool.execute("call-1", params, undefined, undefined, {});
+}
+
+test("registered schema enumerates the live fleet on all agent-name fields", () => {
+	const params = populatedDelegateTool.parameters;
+	assert.deepEqual(agentSchemaOf(params).enum, ["scout", "worker"]);
+	assert.deepEqual(taskItemAgentSchemaOf(params).enum, ["scout", "worker"]);
+	assert.deepEqual(chainStepAgentSchemaOf(params).enum, ["scout", "worker"]);
+});
+
+test("description tells the model to use exact fleet names and how to discover them", () => {
+	assert.match(populatedDelegateTool.description, /never invent one/i);
+	assert.match(populatedDelegateTool.description, /\{action: 'list'\}/);
+});
+
+test("list action returns the live fleet without spawning any subagent", async () => {
+	const out = await executeDelegate({ action: "list" });
+	const text = out.content[0].text as string;
+	assert.match(text, /Fleet \(agents available via delegate\)/);
+	assert.match(text, /- \*\*scout\*\* \(builtin, tools: read, grep\): Fast read-only codebase recon/);
+	assert.match(text, /- \*\*worker\*\* \(project, full tools, model: anthropic\/claude-sonnet-4, maxTurns: 20\): General-purpose implementation agent/);
+	assert.equal(out.details.results.length, 0);
+});
+
+test("list action wins over stray dispatch params (no accidental spawn)", async () => {
+	const out = await executeDelegate({ action: "list", agent: "worker", task: "should be ignored" });
+	assert.match(out.content[0].text, /Fleet \(agents available via delegate\)/);
+});
+
+test("list action on an empty fleet reports an empty fleet", async () => {
+	let captured: any;
+	registerDelegateTool(
+		{ registerTool: (t: any) => (captured = t) } as any,
+		{
+			getAgents: () => [],
+			getDispatchDefaults: () => ({}),
+			getCwd: () => process.cwd(),
+			getSignal: () => undefined,
+			onIdle: () => {},
+		},
+	);
+	const out = await captured.execute("call-1", { action: "list" }, undefined, undefined, {});
+	assert.match(out.content[0].text, /fleet is empty/);
+});

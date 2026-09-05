@@ -676,7 +676,7 @@ async function runSingleAgent(
 			exitCode: 1,
 			completedNormally: false,
 			messages: [],
-			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
+			stderr: `Unknown agent: "${agentName}". Available agents: ${available}. Call delegate({action: "list"}) for fleet details.`,
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0, toolTurns: 0 },
 			step,
 		};
@@ -1058,28 +1058,60 @@ async function runSingleAgent(
 
 // ── Tool schema ─────────────────────────────────────────────────────────────
 
-const TaskItem = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
-	task: Type.String({ description: "Task to delegate to the agent" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-});
+/**
+ * Agent-name schema shared by single mode, tasks[], and chain[]. When the
+ * fleet is non-empty, the names are published as a JSON-Schema `enum` so the
+ * model picks from real names instead of inventing plausible ones (the
+ * every-first-turn mangle: free-form string + prose roles ⇒ hallucinated
+ * agent names). Empty fleet falls back to free-form, and the enum reflects
+ * the fleet at registration time — the always-fresh truth lives in the
+ * `list` action and the unknown-agent error.
+ */
+export function agentNameParam(description: string, fleetNames: string[]) {
+	return Type.String({
+		description: fleetNames.length > 0 ? `${description} Valid names: ${fleetNames.join(", ")}.` : description,
+		...(fleetNames.length > 0 ? { enum: fleetNames } : {}),
+	});
+}
 
-const DelegateParams = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Agent name (single mode)" })),
-	task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "Parallel mode: array of {agent, task}. Max 8." })),
-	chain: Type.Optional(
-		Type.Array(
-			Type.Object({
-				agent: Type.String({ description: "Agent name for this step" }),
-				task: Type.String({ description: "Task; {previous} inserts the prior step's output" }),
-				cwd: Type.Optional(Type.String({ description: "Working directory" })),
+/**
+ * Parameter schema for one fleet state. Rebuilt per registration so the Rebuilt per registration so the
+ * `enum` on every agent-name field lists the agents discovered at extension
+ * load (builtin + user + project for the session cwd).
+ */
+export function buildDelegateParams(fleetNames: string[]) {
+	return Type.Object({
+		action: Type.Optional(
+			Type.String({
+				enum: ["list"],
+				description: "Discovery action: pass exactly {action: 'list'} with no other params to get the current fleet (names, sources, tools, descriptions). Use this when unsure which agents exist.",
 			}),
-			{ description: "Chain mode: sequential steps; {previous} in task inserts prior output" },
 		),
-	),
-	cwd: Type.Optional(Type.String({ description: "Working directory (single mode)" })),
-});
+		agent: Type.Optional(agentNameParam("Agent name (single mode)", fleetNames)),
+		task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
+		tasks: Type.Optional(
+			Type.Array(
+				Type.Object({
+					agent: agentNameParam("Name of the agent to invoke", fleetNames),
+					task: Type.String({ description: "Task to delegate to the agent" }),
+					cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+				}),
+				{ description: "Parallel mode: array of {agent, task}. Max 8." },
+			),
+		),
+		chain: Type.Optional(
+			Type.Array(
+				Type.Object({
+					agent: agentNameParam("Agent name for this step", fleetNames),
+					task: Type.String({ description: "Task; {previous} inserts the prior step's output" }),
+					cwd: Type.Optional(Type.String({ description: "Working directory" })),
+				}),
+				{ description: "Chain mode: sequential steps; {previous} in task inserts prior output" },
+			),
+		),
+		cwd: Type.Optional(Type.String({ description: "Working directory (single mode)" })),
+	});
+}
 
 // ── Registration ────────────────────────────────────────────────────────────
 
@@ -1111,19 +1143,57 @@ export interface DelegateDeps {
 	getParentPrompt?: () => string | undefined;
 }
 
+/**
+ * One-line entry for the `list` action's fleet report.
+ */
+function formatAgentListing(a: AgentConfig): string {
+	const attrs = [
+		a.source,
+		a.tools ? `tools: ${a.tools.join(", ")}` : "full tools",
+		a.model ? `model: ${a.model}` : undefined,
+		a.maxTurns ? `maxTurns: ${a.maxTurns}` : undefined,
+	].filter(Boolean);
+	return `- **${a.name}** (${attrs.join(", ")}): ${a.description}`;
+}
+
 export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
+	// The fleet enum lives in the schema, not just the prose: the model
+	// generates against the tool schema, so listing real names there is what
+	// stops the first-call hallucinated-agent mangle (prose policy text alone
+	// lost that fight in practice — see the saifymatteo first-turn failures).
+	// It reflects the fleet at registration time; the `list` action below is
+	// the always-fresh truth.
+	const fleetNames = deps.getAgents().map((a) => a.name);
 	pi.registerTool({
 		name: "delegate",
 		label: "Delegate",
 		description:
 			"Delegate work to a fleet subagent with an isolated context and full tools. " +
 			"Modes: single ({agent, task}), parallel ({tasks: [{agent, task}]}, max 8), " +
-			"chain ({chain: [{agent, task}]}, sequential, {previous} placeholder inserts the prior step's output). " +
+			"chain ({chain: [{agent, task}]}, sequential, {previous} placeholder inserts the prior step's output), " +
+			"discovery ({action: 'list'} returns the current fleet). " +
+			"Agent names must be exact fleet names — never invent one; when unsure, list first. " +
 			"This is your only way to read, write, edit, search, or run commands.",
-		parameters: DelegateParams,
+		parameters: buildDelegateParams(fleetNames),
 
 		async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {
 			const agents = deps.getAgents();
+
+			// Discovery action (zero-cost): report the live fleet — recomputed per
+			// call, so it reflects agents added after registration (the schema
+			// enum cannot). Cheap enough to call on every first-turn uncertainty.
+			if (params?.action === "list") {
+				const listing = agents.map(formatAgentListing).join("\n") || "(fleet is empty — no agents discovered)";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Fleet (agents available via delegate):\n${listing}`,
+						},
+					],
+					details: { mode: "single", results: [] },
+				};
+			}
 			const dispatchDefaults = deps.getDispatchDefaults(ctx);
 			const defaultMaxTurns = deps.getMaxTurns?.() ?? DEFAULT_MAX_TURNS;
 			const stallTimeoutMs = deps.getStallTimeoutMs?.() ?? DEFAULT_STALL_TIMEOUT_MS;
@@ -1171,7 +1241,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 					content: [
 						{
 							type: "text",
-							text: `Invalid parameters: provide exactly one of {agent+task}, {tasks[]}, {chain[]}.\nAvailable agents: ${available}`,
+							text: `Invalid parameters: provide exactly one of {agent+task}, {tasks[]}, {chain[]} — or {action: "list"} to see the fleet.\nAvailable agents: ${available}`,
 						},
 					],
 					details: makeDetails("single")([]),

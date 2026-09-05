@@ -49,7 +49,9 @@ pi -e <path-to-your-clone>/pi-orchestrator/index.ts
 
 Child success is state-based (the RPC `agent_settled` event); child exit codes are informational only, since settled children are SIGTERMed by design.
 
-`delegate` takes three shapes: `{agent, task}` for a single job, `tasks[]` (max 8, concurrency 4) for independent parallel work, and `chain[]` with a `{previous}` placeholder for dependent steps.
+`delegate` takes three dispatch shapes: `{agent, task}` for a single job, `tasks[]` (max 8, concurrency 4) for independent parallel work, and `chain[]` with a `{previous}` placeholder for dependent steps — plus a discovery shape, `{action: "list"}`, which returns the live fleet (names, sources, tools, descriptions) without spawning anything.
+
+Agent names are discoverable before the first call: every `agent` field in the tool schema carries a JSON-Schema `enum` of the fleet discovered at extension load (fallback: free-form when the fleet is empty), so models pick from real names instead of inventing plausible ones. The `list` action and the `Unknown agent: ... Available agents: ...` error always reflect the fleet as of right now, including agents added mid-session.
 
 ## Config — `~/.pi/agent/orchestrator.json`
 

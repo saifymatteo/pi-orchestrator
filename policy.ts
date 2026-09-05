@@ -45,6 +45,8 @@ ${allowList}
 ### Fleet (agents available via \`delegate\`)
 
 ${fleet || "(no agents discovered — inform the user that the fleet is empty)"}
+
+Call \`delegate\` with \`{action: "list"}\` to re-check the fleet mid-session (the listing reflects agents added after session start).
 ${flows}
 ### Rules
 
