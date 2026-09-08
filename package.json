@@ -45,6 +45,6 @@
     "@sinclair/typebox": "^0.34.52"
   },
   "scripts": {
-    "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts tests/index.test.ts"
+    "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts tests/index.test.ts tests/rpc-waiters.test.ts"
   }
 }

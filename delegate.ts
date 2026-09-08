@@ -189,6 +189,85 @@ export function killAllFleet(): void {
 	liveProcs.clear();
 }
 
+const NL = String.fromCharCode(10);
+
+/** One RPC response line from a child (rpc.md): `{ id, type: "response",
+ *  success, data?, error? }`. Loose by design — pi owns the payload shape. */
+export interface RpcResponse {
+	id?: string;
+	type?: string;
+	success?: boolean;
+	error?: string;
+	data?: any;
+	[key: string]: unknown;
+}
+
+/**
+ * Id-matched RPC response waiters for one child process (ADR-0011).
+ *
+ * Extracted out of `runSingleAgent` on purpose. The sub-session helper used to
+ * be declared *inside* the run's exit-promise executor, whose `resolve` was in
+ * lexical scope; the helper called that `resolve` instead of its own, so the
+ * first `get_state` response ended the entire run — `exitCode` became the
+ * response object, the result collapsed to "(no output)", and the child was
+ * never killed. Here there is no outer resolver to capture: a waiter can only
+ * ever settle its own promise.
+ */
+export interface RpcWaiters {
+	/** Send `cmd` with `id` attached and wait for the response carrying that id.
+	 *  Resolves `null` on timeout or `flush()` — never rejects (setup is
+	 *  best-effort and must not fail the run). */
+	command(cmd: Record<string, unknown>, id: string): Promise<RpcResponse | null>;
+	/** Route one incoming response: settles the waiter registered for
+	 *  `event.id`, if any. Returns whether it matched, so callers keep their own
+	 *  handling of the same line. Unknown ids are ignored (return false). */
+	deliver(event: { id?: string } | null | undefined): boolean;
+	/** Unblock every pending waiter with `null` (child gone / run aborted). */
+	flush(): void;
+	/** Outstanding waiters (tests, diagnostics). */
+	pending(): number;
+}
+
+export function createRpcWaiters(
+	send: (obj: Record<string, unknown>) => void,
+	timeoutMs: number,
+): RpcWaiters {
+	const waiters = new Map<string, (resp: RpcResponse | null) => void>();
+
+	const settle = (id: string, resp: RpcResponse | null): boolean => {
+		const waiter = waiters.get(id);
+		if (!waiter) return false;
+		waiters.delete(id);
+		waiter(resp);
+		return true;
+	};
+
+	return {
+		command(cmd: Record<string, unknown>, id: string): Promise<RpcResponse | null> {
+			return new Promise<RpcResponse | null>((resolveCmd) => {
+				const timer = setTimeout(() => settle(id, null), timeoutMs);
+				timer.unref?.();
+				waiters.set(id, (resp) => {
+					clearTimeout(timer);
+					resolveCmd(resp);
+				});
+				send({ id, ...cmd });
+			});
+		},
+		deliver(event: { id?: string } | null | undefined): boolean {
+			if (!event || typeof event.id !== "string") return false;
+			return settle(event.id, event as RpcResponse);
+		},
+		flush(): void {
+			for (const id of Array.from(waiters.keys())) settle(id, null);
+		},
+		pending(): number {
+			return waiters.size;
+		},
+	};
+}
+
+
 /**
  * Send an RPC command to the child's stdin (JSON + newline, per rpc.md).
  * EPIPE-safe: the child may have died or closed stdin between checks.
@@ -911,7 +990,7 @@ async function runSingleAgent(
 			}
 		};
 
-		const exitCode = await new Promise<number>((resolve) => {
+		const exitCode = await new Promise<number>((resolveExit) => {
 			const invocation = resolvePiInvocation();
 			const proc = spawn(invocation.command, [...invocation.argsPrefix, ...args], {
 				cwd: cwd ?? defaultCwd,
@@ -979,9 +1058,9 @@ async function runSingleAgent(
 			}, STALL_CHECK_INTERVAL_MS);
 			stallTimer.unref?.();
 
-			// Awaited RPC commands (sub-session setup): id → waiter. Responses
-			// resolve in processLine; close/error resolves everything with null.
-			const pendingResponses = new Map<string, (resp: any | null) => void>();
+			// Awaited RPC commands (sub-session setup): id-matched waiters, fed
+			// from processLine and unblocked en masse by close/error.
+			const rpcWaiters = createRpcWaiters((obj) => sendRpc(proc, obj), RPC_SETUP_TIMEOUT_MS);
 
 			const processLine = (line: string) => {
 				// Every stdout line counts as activity — response lines, message
@@ -1000,12 +1079,8 @@ async function runSingleAgent(
 				// through the normal event stream instead.
 				if (event.type === "response") {
 					// Awaited session-setup commands (get_state / new_session)
-					// resolve their waiters here; unknown ids are ignored.
-					const waiter = pendingResponses.get(event.id);
-					if (waiter) {
-						pendingResponses.delete(event.id);
-						waiter(event);
-					}
+					// settle their waiter here; unknown ids are ignored.
+					rpcWaiters.deliver(event);
 					if (event.id === "init" && event.success === false) {
 						stopStallWatchdog();
 						currentResult.stopReason = "error";
@@ -1131,17 +1206,24 @@ async function runSingleAgent(
 			proc.on("close", (code) => {
 				cleanup();
 				// Unblock any session-setup waiters — the child is gone, so their
-				// responses will never arrive. resolve(null) skips the link.
-				for (const waiter of pendingResponses.values()) waiter(null);
-				pendingResponses.clear();
-				resolve(code ?? 0);
+				// responses will never arrive. flush() with null skips the link.
+				rpcWaiters.flush();
+				resolveExit(code ?? 0);
 			});
 
-			proc.on("error", () => {
+			proc.on("error", (err: unknown) => {
+				// A spawn/stdio error must not collapse into a silent "(no output)":
+				// record the reason so the failure is attributable (the ENOENT case
+				// used to be indistinguishable from a child that simply said nothing).
+				const detail = (err as Error)?.message ?? String(err);
+				const code = (err as { code?: string })?.code;
+				if (!currentResult.errorMessage) {
+					currentResult.errorMessage = `pi child process error${code ? ` (${code})` : ""}: ${detail}`;
+				}
+				currentResult.stderr += currentResult.stderr ? NL + detail : detail;
 				cleanup();
-				for (const waiter of pendingResponses.values()) waiter(null);
-				pendingResponses.clear();
-				resolve(1);
+				rpcWaiters.flush();
+				resolveExit(1);
 			});
 
 			if (signal) {
@@ -1173,32 +1255,19 @@ async function runSingleAgent(
 			// run. No awaits in the executor itself — the sync executor must not
 			// become an async one.
 			const setupSubSession = async (): Promise<void> => {
-				const rpcCommand = (cmd: Record<string, unknown>, id: string): Promise<any | null> =>
-					new Promise((resolveCmd) => {
-						const timer = setTimeout(() => {
-							pendingResponses.delete(id);
-							resolve(null);
-						}, RPC_SETUP_TIMEOUT_MS);
-						timer.unref?.();
-						pendingResponses.set(id, (resp) => {
-							clearTimeout(timer);
-							resolve(resp);
-						});
-						sendRpc(proc, { id, ...cmd });
-					});
 				try {
-					const before = await rpcCommand({ type: "get_state" }, "sess-before");
+					const before = await rpcWaiters.command({ type: "get_state" }, "sess-before");
 					if (before?.data?.sessionFile) {
 						currentResult.sessionId = before.data.sessionId;
 						currentResult.sessionFile = before.data.sessionFile;
 					}
 					if (sessionOpts.parentSessionFile) {
-						const resp = await rpcCommand(
+						const resp = await rpcWaiters.command(
 							{ type: "new_session", parentSession: sessionOpts.parentSessionFile },
 							"sess-link",
 						);
 						if (resp?.success && resp.data?.cancelled === false) {
-							const after = await rpcCommand({ type: "get_state" }, "sess-after");
+							const after = await rpcWaiters.command({ type: "get_state" }, "sess-after");
 							if (after?.data?.sessionFile) {
 								currentResult.sessionId = after.data.sessionId;
 								currentResult.sessionFile = after.data.sessionFile;
