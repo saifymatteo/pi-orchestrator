@@ -14,7 +14,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 
 import { idleFleetWidgetLines, renderFleetLines } from "../delegate.ts";
-import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId } from "../delegate.ts";
+import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId, parallelProgress, runStatus, taskStatus } from "../delegate.ts";
 import { buildChildSpawnArgs, expandBlockedToolsToNames, stableSessionId } from "../delegate.ts";
 
 // Provider-neutral model placeholders and OS-native synthetic paths — the
@@ -796,4 +796,132 @@ test("sessions action with no parent session file degrades gracefully", async ()
 	);
 	const out = await captured.execute("call-1", { action: "sessions" }, undefined, undefined, {});
 	assert.match(out.content[0].text, /ephemeral/);
+});
+
+// ── taskStatus / runStatus: three-state fleet status contract ───────────────
+// Running reads yellow, finished-success green, finished-failure red, in every
+// dispatch mode. The parallel/chain branch used to read `completedNormally:
+// false` as failure on its own — which is also the shape of a live, still
+// running result — so a working fleet rendered red ✗ until it settled.
+
+const settledOk = (agent: string) =>
+	singleResult({
+		agent,
+		completedNormally: true,
+		messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
+	});
+/** What placeholders and live partial emissions publish (see emitUpdate). */
+const liveTask = (agent: string) => singleResult({ agent, exitCode: -1 });
+const settledFail = (agent: string) => singleResult({ agent, stopReason: "error", errorMessage: "boom" });
+
+test("taskStatus: exitCode -1 sentinel is running even though the result is unsettled", () => {
+	assert.equal(taskStatus(liveTask("scout")), "running");
+});
+
+test("taskStatus: live partial without the sentinel is running, not failed", () => {
+	assert.equal(taskStatus(singleResult({ agent: "scout" }), true), "running");
+});
+
+test("taskStatus: a definitive failure outranks partial rendering", () => {
+	assert.equal(taskStatus(settledFail("scout"), true), "failed");
+	assert.equal(taskStatus(singleResult({ stopReason: "turn-budget-exhausted" }), true), "failed");
+	assert.equal(taskStatus(singleResult({ errorMessage: "spawn ENOENT" }), true), "failed");
+});
+
+test("taskStatus: finished-but-unsettled is failed once the call is no longer partial", () => {
+	assert.equal(taskStatus(singleResult({ agent: "scout" })), "failed");
+	assert.equal(taskStatus(settledOk("scout")), "success");
+});
+
+test("runStatus: running wins while any task is unsettled, even beside a failure", () => {
+	const status = runStatus([settledFail("scout"), liveTask("worker")]);
+	assert.equal(status.status, "running");
+	assert.equal(status.successCount, 0);
+});
+
+test("runStatus: finished run splits success and failure; an empty run is not a failure", () => {
+	assert.equal(runStatus([settledOk("a"), settledOk("b")]).status, "success");
+	assert.equal(runStatus([settledOk("a"), settledFail("b")]).status, "failed");
+	assert.equal(runStatus([]).status, "success");
+	assert.equal(runStatus([settledOk("a"), settledOk("b")]).successCount, 2);
+});
+
+// ── renderResult: parallel and chain icons ──────────────────────────────────
+
+function renderMultiCollapsed(mode: "parallel" | "chain", results: any[], options: Record<string, unknown> = {}): string {
+	const out = delegateTool.renderResult(
+		{ content: [], details: { mode, results } },
+		{ expanded: false, ...options },
+		passthroughTheme,
+		undefined,
+	);
+	return out.text as string;
+}
+
+test("renderResult parallel mid-run: running tasks ⏳, header ◐, nothing red or green", () => {
+	const text = renderMultiCollapsed("parallel", [liveTask("scout"), liveTask("worker")], { isPartial: true });
+	assert.equal((text.match(/⏳/g) || []).length, 2, text);
+	assert.ok(text.includes("◐"), `expected the in-progress header: ${text}`);
+	assert.ok(!text.includes("✗"), `running fleet must not show failure icons: ${text}`);
+	assert.ok(!text.includes("✓"), `running fleet must not claim success: ${text}`);
+	assert.match(text, /\(running\.\.\.\)/);
+});
+
+test("renderResult parallel mixed mid-run: finished task ✓, running task ⏳, no red", () => {
+	const text = renderMultiCollapsed("parallel", [settledOk("scout"), liveTask("worker")], { isPartial: true });
+	assert.ok(text.includes("✓"), `finished task should show success: ${text}`);
+	assert.ok(text.includes("⏳"), `running task should show in-progress: ${text}`);
+	assert.ok(!text.includes("✗"), text);
+});
+
+test("renderResult parallel all-success: header ✓ and 2/2", () => {
+	const text = renderMultiCollapsed("parallel", [settledOk("scout"), settledOk("worker")]);
+	assert.ok(text.includes("✓"), text);
+	assert.match(text, /2\/2/);
+	assert.ok(!text.includes("✗") && !text.includes("◐") && !text.includes("⏳"), text);
+});
+
+test("renderResult parallel finished with one failure: header is the failure icon, not in-progress ◐", () => {
+	const text = renderMultiCollapsed("parallel", [settledOk("scout"), settledFail("worker")]);
+	assert.ok(text.includes("✗"), `expected failure icons: ${text}`);
+	assert.ok(!text.includes("◐"), `a finished run must not use the in-progress header: ${text}`);
+	assert.match(text, /1\/2/);
+});
+
+test("renderResult chain mid-run: current step ⏳ rather than ✗, completed step ✓", () => {
+	const text = renderMultiCollapsed("chain", [{ ...settledOk("scout"), step: 1 }, liveTask("worker")], { isPartial: true });
+	assert.ok(text.includes("⏳"), text);
+	assert.ok(text.includes("✓"), text);
+	assert.ok(!text.includes("✗"), `chain mid-run must not read as failure: ${text}`);
+	assert.match(text, /Step 1/);
+});
+
+test("renderResult expanded parallel mid-run: no failure icon while tasks are working", () => {
+	const out = delegateTool.renderResult(
+		{ content: [], details: { mode: "parallel", results: [liveTask("scout"), liveTask("worker")] } },
+		{ expanded: true, isPartial: true },
+		passthroughTheme,
+		undefined,
+	);
+	const flat = JSON.stringify(out);
+	assert.ok(!flat.includes("✗"), `expanded running view must not show failure icons: ${flat}`);
+	assert.ok((flat.match(/⏳/g) || []).length >= 2, `expected per-task in-progress icons: ${flat}`);
+});
+
+// ── parallelProgress: every slot is either done or running ──────────────────
+
+test("parallelProgress: fresh placeholders count as running (was: neither done nor running)", () => {
+	assert.equal(parallelProgress([liveTask("scout"), liveTask("worker")]), "Parallel: 0/2 done, 2 running...");
+});
+
+test("parallelProgress: mixed finished and running", () => {
+	assert.equal(parallelProgress([settledOk("scout"), liveTask("worker")]), "Parallel: 1/2 done, 1 running...");
+});
+
+test("parallelProgress: a settled failure is done, not running", () => {
+	assert.equal(parallelProgress([settledFail("scout"), liveTask("worker")]), "Parallel: 1/2 done, 1 running...");
+});
+
+test("parallelProgress: finished run reports no running tasks", () => {
+	assert.equal(parallelProgress([settledOk("a"), settledOk("b")]), "Parallel: 2/2 done, 0 running...");
 });

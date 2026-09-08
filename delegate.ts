@@ -485,14 +485,84 @@ function getFinalOutput(messages: Message[]): string {
  * Failure is state-based, never exit-code-based: RPC children are killed
  * (SIGTERM) right after agent_settled, so their exit code is not meaningful.
  */
-function isFailedResult(result: SingleResult): boolean {
-	return (
-		!result.completedNormally ||
-		result.stopReason === "error" ||
-		result.stopReason === "aborted" ||
-		result.stopReason === "turn-budget-exhausted" ||
-		result.stopReason === "stall-timeout"
-	);
+/** Stop reasons that mean the run ended badly (as opposed to transiently, e.g.
+ *  the child's mid-run `"toolUse"`). */
+const FAILURE_STOP_REASONS = new Set(["error", "aborted", "turn-budget-exhausted", "stall-timeout"]);
+
+type FailureSignals = Pick<SingleResult, "completedNormally" | "stopReason">;
+
+function isFailedResult(result: FailureSignals): boolean {
+	return !result.completedNormally || (!!result.stopReason && FAILURE_STOP_REASONS.has(result.stopReason));
+}
+
+/**
+ * A failure signal that is final even while the run is still in flight: an
+ * explicit failure stop reason, or an error message. An unsettled result with
+ * neither is not a failure — it is a task that is still working.
+ */
+function isDefinitiveFailure(result: SingleResult): boolean {
+	return (!!result.stopReason && FAILURE_STOP_REASONS.has(result.stopReason)) || !!result.errorMessage;
+}
+
+// ── Run/task display status (fleet widget + tool block icons) ───────────────
+
+/**
+ * Display state of one task. `running` is the not-yet-settled state, encoded by
+ * the `exitCode: -1` sentinel that both parallel placeholders and live partial
+ * emissions carry (see `emitUpdate`) — a real child exit code is never -1.
+ *
+ * `callIsPartial` is the renderer-side backstop: while pi renders an in-flight
+ * tool call, an unsettled task with no definitive failure signal is running.
+ * Without either signal an unsettled result reads as failure — correct for a
+ * finished run, and the bug that painted running subagents red ✗ in parallel
+ * and chain mode.
+ */
+export type TaskStatus = "running" | "failed" | "success";
+
+export function taskStatus(result: SingleResult, callIsPartial = false): TaskStatus {
+	if (result.exitCode === -1) return "running";
+	if (isDefinitiveFailure(result)) return "failed";
+	if (callIsPartial && !result.completedNormally) return "running";
+	return isFailedResult(result) ? "failed" : "success";
+}
+
+/**
+ * Header state for a multi-task run: `running` while any task is unsettled,
+ * `success` when a finished run has no failures, `failed` only once finished
+ * with at least one failure. A running fleet must never read as failure.
+ */
+export function runStatus(
+	results: readonly SingleResult[],
+	callIsPartial = false,
+): { status: TaskStatus; successCount: number } {
+	const statuses = results.map((r) => taskStatus(r, callIsPartial));
+	const successCount = statuses.filter((s) => s === "success").length;
+	if (statuses.some((s) => s === "running")) return { status: "running", successCount };
+	return { status: successCount === results.length ? "success" : "failed", successCount };
+}
+
+/**
+ * In-flight progress line for a parallel run. Counts through `taskStatus` so a
+ * live partial counts as running: the inline version compared against
+ * `exitCode === -1` on results whose sentinel had already been overwritten by
+ * the first partial emission, so two working subagents read as
+ * "0/2 done, 0 running" — neither done nor running.
+ */
+export function parallelProgress(results: readonly SingleResult[]): string {
+	const running = results.filter((r) => taskStatus(r) === "running").length;
+	return `Parallel: ${results.length - running}/${results.length} done, ${running} running...`;
+}
+
+/** Single source of truth pairing a status with its theme color and glyph. */
+const STATUS_GLYPH: Record<TaskStatus, [color: string, glyph: string]> = {
+	running: ["warning", "⏳"],
+	failed: ["error", "✗"],
+	success: ["success", "✓"],
+};
+
+function statusIcon(theme: { fg(color: any, text: string): string }, status: TaskStatus): string {
+	const [color, glyph] = STATUS_GLYPH[status];
+	return theme.fg(color, glyph);
 }
 
 function getResultOutput(result: SingleResult): string {
@@ -948,7 +1018,12 @@ async function runSingleAgent(
 		if (onUpdate) {
 			onUpdate({
 				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
-				details: makeDetails([currentResult]),
+				// Publish the shared "running" sentinel instead of the initial
+				// exitCode 0: an unsettled result with a real-looking exit code is
+				// what made running tasks render red ✗ in parallel/chain, and made the
+				// parallel progress line count them as neither done nor running.
+				// Spread, because `currentResult` keeps being mutated until settle.
+				details: makeDetails([{ ...currentResult, exitCode: -1 }]),
 			});
 		}
 	};
@@ -1667,10 +1742,8 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 
 					const emitParallelUpdate = () => {
 						if (onUpdate) {
-							const running = allResults.filter((r) => r.exitCode === -1).length;
-							const done = allResults.filter((r) => r.exitCode !== -1).length;
 							onUpdate({
-								content: [{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` }],
+								content: [{ type: "text", text: parallelProgress(allResults) }],
 								details: makeDetails("parallel")([...allResults]),
 							});
 						}
@@ -1871,13 +1944,10 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 				const r = details.results[0];
 				// Mid-run, pi re-invokes renderResult with isPartial=true and the child's
 				// stopReason is transiently "toolUse" — render as running, not failed.
-				const isRunning = isPartial === true || context?.isPartial === true || r.exitCode === -1;
-				const isError = !isRunning && isFailedResult(r);
-				const icon = isRunning
-					? theme.fg("warning", "⏳")
-					: isError
-						? theme.fg("error", "✗")
-						: theme.fg("success", "✓");
+				const status = taskStatus(r, isPartial === true || context?.isPartial === true);
+				const isRunning = status === "running";
+				const isError = status === "failed";
+				const icon = statusIcon(theme, status);
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
 
@@ -1930,9 +2000,12 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 				return new Text(text, 0, 0);
 			}
 
-			const successCount = details.results.filter((r) => !isFailedResult(r) && r.exitCode !== -1).length;
+			const callIsPartial = isPartial === true || context?.isPartial === true;
+			const { status: runState, successCount } = runStatus(details.results, callIsPartial);
 			const total = details.results.length;
-			const icon = successCount === total ? theme.fg("success", "✓") : theme.fg("warning", "◐");
+			// Yellow while any task runs, green when a finished run fully succeeded,
+			// red only once it is finished with a failure.
+			const icon = runState === "running" ? theme.fg("warning", "◐") : statusIcon(theme, runState);
 
 			if (expanded) {
 				const container = new Container();
@@ -1944,7 +2017,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 					),
 				);
 				for (const r of details.results) {
-					const rIcon = r.exitCode === -1 ? theme.fg("warning", "⏳") : isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
+					const rIcon = statusIcon(theme, taskStatus(r, callIsPartial));
 					const displayItems = getDisplayItems(r.messages);
 					const finalOutput = getFinalOutput(r.messages);
 
@@ -1982,15 +2055,11 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 
 			let text = `${icon} ${theme.fg("toolTitle", theme.bold(details.mode + " "))}${theme.fg("accent", `${successCount}/${total}`)}`;
 			for (const r of details.results) {
-				const rIcon =
-					r.exitCode === -1
-						? theme.fg("warning", "⏳")
-						: isFailedResult(r)
-							? theme.fg("error", "✗")
-							: theme.fg("success", "✓");
+				const taskSt = taskStatus(r, callIsPartial);
+				const rIcon = statusIcon(theme, taskSt);
 				const displayItems = getDisplayItems(r.messages);
 				text += `\n\n${theme.fg("muted", r.step ? `─── Step ${r.step}: ` : "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
-				if (displayItems.length === 0) text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+				if (displayItems.length === 0) text += `\n${theme.fg("muted", taskSt === "running" ? "(running...)" : "(no output)")}`;
 				else text += `\n${renderDisplayItems(displayItems, 5)}`;
 			}
 			const usageStr = formatUsageStats(aggregateUsage(details.results));
