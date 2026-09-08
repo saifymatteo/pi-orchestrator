@@ -269,6 +269,9 @@ export function buildDelegateDeps(getConfig: () => OrchestratorConfig, onIdle: (
 		// sub-sessions of a session live together and delegate({action:
 		// "sessions"}) can list them. Undefined when the parent runs ephemeral.
 		getChildSessions: () => getConfig().childSessions,
+		// Widget label source of truth: index keeps `config.enabled` in sync with
+		// its `engaged` flag (setEngaged writes both, session_start reloads).
+		getOrchestratorMode: () => (getConfig().enabled ? "engaged" : "auto"),
 		getParentSessionFile: (ctx: any) => {
 			try {
 				return ctx?.sessionManager?.getSessionFile?.() ?? undefined;
@@ -302,11 +305,16 @@ export default function (pi: any) {
 		// never wrongly suppressed — this only defuses stale/extra callers.
 		if (hasRunningTasks()) return;
 		try {
-			if (engaged) {
-				lastUi.setWidget("orchestrator-fleet", idleFleetWidgetLines(discoverAgents(config).map((a) => a.name)));
-			} else {
-				clearFleetWidget(lastUi);
-			}
+			// Always painted, never hidden mid-session: this widget is the only
+			// place the state is visible, and clearing it when disengaged left
+			// whatever a finished run last painted on screen instead.
+			lastUi.setWidget(
+				"orchestrator-fleet",
+				idleFleetWidgetLines(
+					discoverAgents(config).map((a) => a.name),
+					engaged ? "engaged" : "auto",
+				),
+			);
 		} catch {
 			/* not in TUI */
 		}
@@ -345,7 +353,7 @@ export default function (pi: any) {
 			ctx.ui.notify(
 				next
 					? `Orchestrator ENGAGED · fleet: ${discoverAgents(config).map((a) => a.name).join(", ") || "(empty)"}`
-					: "Orchestrator disengaged — full toolset restored (persisted to orchestrator.json)",
+					: "Orchestrator: AUTO — full toolset restored, delegate still on demand (persisted to orchestrator.json)",
 				next ? "info" : "warning",
 			);
 		}
@@ -361,10 +369,16 @@ export default function (pi: any) {
 
 		if (engaged) {
 			applyReduction();
-			updateIdleWidget();
-		} else if (ctx?.ui?.notify) {
+		}
+		// State line in both states — `engaged` when the gate forces delegation,
+		// `auto` when it does not (ADR-0003).
+		updateIdleWidget();
+		if (!engaged && ctx?.ui?.notify) {
 			// Defuse the "why isn't it forcing?" surprise (ADR-0003)
-			ctx.ui.notify("Orchestrator is DISENGAGED (orchestrator.json enabled:false). Run /orchestrator to engage.", "warning");
+			ctx.ui.notify(
+				"Orchestrator: AUTO (orchestrator.json enabled:false) — full toolset, delegate on demand. Run /orchestrator to engage.",
+				"warning",
+			);
 		}
 	});
 

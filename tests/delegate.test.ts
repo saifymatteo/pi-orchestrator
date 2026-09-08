@@ -39,22 +39,44 @@ function task(overrides = {}) {
 	};
 }
 
-test("idle fallback: no running tasks shows engaged line with fleet names", () => {
-	assert.deepEqual(renderFleetLines([], ["scout", "worker"]), [
+test("idle fallback: engaged state shows the engaged line with fleet names", () => {
+	assert.deepEqual(renderFleetLines([], ["scout", "worker"], "engaged"), [
 		"orchestrator: engaged · fleet: scout, worker",
 	]);
 });
 
 test("idle fallback: empty fleet shows (empty)", () => {
-	assert.deepEqual(renderFleetLines([], []), ["orchestrator: engaged · fleet: (empty)"]);
+	assert.deepEqual(renderFleetLines([], [], "engaged"), ["orchestrator: engaged · fleet: (empty)"]);
 });
 
-test("idleFleetWidgetLines matches the idle fallback of renderFleetLines", () => {
-	assert.deepEqual(idleFleetWidgetLines(["scout"]), ["orchestrator: engaged · fleet: scout"]);
+test("idle fallback: disengaged shows `auto`, never `engaged` (the gate is not forcing)", () => {
+	assert.deepEqual(renderFleetLines([], ["scout", "worker"], "auto"), [
+		"orchestrator: auto · fleet: scout, worker",
+	]);
+	assert.deepEqual(renderFleetLines([], [], "auto"), ["orchestrator: auto · fleet: (empty)"]);
+});
+
+test("state label is the only difference between the two modes (no hidden claim in auto)", () => {
+	const engaged = renderFleetLines([], ["scout"], "engaged")[0];
+	const auto = renderFleetLines([], ["scout"], "auto")[0];
+	assert.equal(auto.replace("auto", "engaged"), engaged);
+});
+
+test("running-task lines stay state-neutral in both modes", () => {
+	const one = task({ agent: "scout", mode: "single" });
+	assert.deepEqual(renderFleetLines([one], ["scout"], "engaged"), renderFleetLines([one], ["scout"], "auto"));
+});
+
+test("idleFleetWidgetLines matches the idle fallback of renderFleetLines (both states)", () => {
+	for (const orchestratorMode of ["engaged", "auto"] as const) {
+		assert.deepEqual(idleFleetWidgetLines(["scout"], orchestratorMode), renderFleetLines([], ["scout"], orchestratorMode));
+	}
+	assert.deepEqual(idleFleetWidgetLines(["scout"], "engaged"), ["orchestrator: engaged · fleet: scout"]);
+	assert.deepEqual(idleFleetWidgetLines(["scout"], "auto"), ["orchestrator: auto · fleet: scout"]);
 });
 
 test("grouped header with shared mode and running count (even for 1 task)", () => {
-	const lines = renderFleetLines([task({ agent: "scout", mode: "single" })], ["scout"]);
+	const lines = renderFleetLines([task({ agent: "scout", mode: "single" })], ["scout"], "engaged");
 	assert.equal(lines.length, 2);
 	assert.equal(lines[0], "⏳ Fleet · single · 1 running");
 	assert.match(lines[1], /^  scout · turn 1 · ctx 0 · ↑0 ↓0 · "recon auth flow"$/);
@@ -84,6 +106,7 @@ test("per-agent line keeps token formatting and quoted task summary", () => {
 			}),
 		],
 		["worker"],
+		"engaged",
 	);
 	assert.equal(lines[0], "⏳ Fleet · parallel · 2 running");
 	assert.equal(lines[1], '  worker · turn 7 · ctx 45k · ↑3.0k ↓12k · "implement guardrail"');
@@ -94,18 +117,19 @@ test("mixed header when concurrent runs have different modes", () => {
 	const lines = renderFleetLines(
 		[task({ agent: "scout", mode: "single" }), task({ agent: "worker", mode: "parallel" })],
 		["scout", "worker"],
+		"engaged",
 	);
 	assert.equal(lines[0], "⏳ Fleet · mixed · 2 running");
 });
 
 test("chain mode is shown in the header", () => {
-	const lines = renderFleetLines([task({ agent: "planner", mode: "chain" })], ["planner"]);
+	const lines = renderFleetLines([task({ agent: "planner", mode: "chain" })], ["planner"], "engaged");
 	assert.equal(lines[0], "⏳ Fleet · chain · 1 running");
 });
 
 test("task summary is truncated to 40 chars including the ellipsis", () => {
 	const long = "a".repeat(100);
-	const lines = renderFleetLines([task({ task: long })], ["scout"]);
+	const lines = renderFleetLines([task({ task: long })], ["scout"], "engaged");
 	const summary = lines[1].split('· "')[1].replace(/"$/, "");
 	assert.equal(summary.length, 40);
 	assert.ok(summary.endsWith("…"));
@@ -114,7 +138,7 @@ test("task summary is truncated to 40 chars including the ellipsis", () => {
 
 test("task summary at exactly 40 chars is not truncated", () => {
 	const exact = "b".repeat(40);
-	const lines = renderFleetLines([task({ task: exact })], ["scout"]);
+	const lines = renderFleetLines([task({ task: exact })], ["scout"], "engaged");
 	assert.ok(lines[1].endsWith(`"${exact}"`));
 	assert.ok(!lines[1].includes("…"));
 });
@@ -123,13 +147,14 @@ test("agent names are padded to the longest current name for alignment", () => {
 	const lines = renderFleetLines(
 		[task({ agent: "scout" }), task({ agent: "longername", turns: 2, toolTurns: 2 })],
 		["scout", "longername"],
+		"engaged",
 	);
 	assert.ok(lines[1].startsWith("  scout      · turn 1"));
 	assert.ok(lines[2].startsWith("  longername · turn 2"));
 });
 
 test("agent names longer than 12 chars are truncated, never padded", () => {
-	const lines = renderFleetLines([task({ agent: "averylongagentname", turns: 3, toolTurns: 3 })], ["averylongagentname"]);
+	const lines = renderFleetLines([task({ agent: "averylongagentname", turns: 3, toolTurns: 3 })], ["averylongagentname"], "engaged");
 	assert.ok(lines[1].startsWith("  averylongage · turn 3"));
 	assert.equal(lines[1].indexOf("averylongagentname"), -1);
 });
@@ -150,6 +175,7 @@ const delegateTool: any = (() => {
 			getCwd: () => process.cwd(),
 			getSignal: () => undefined,
 			onIdle: () => {},
+			getOrchestratorMode: () => "engaged",
 		},
 	);
 	return captured;
@@ -238,6 +264,7 @@ test("renderFleetLines with two single-mode tasks shows 2 running", () => {
 	const lines = renderFleetLines(
 		[task({ agent: "scout" }), task({ agent: "worker", turns: 2, toolTurns: 2 })],
 		["scout", "worker"],
+		"engaged",
 	);
 	assert.equal(lines[0], "⏳ Fleet · single · 2 running");
 });
@@ -247,7 +274,7 @@ test("renderFleetLines with two single-mode tasks shows 2 running", () => {
 test("renderFleetLines displays toolTurns, not the raw turn count", () => {
 	// 7 raw turns, 6 tool-bearing (final text-only wrap-up excluded) — the
 	// widget must read turn 6 to match the TUI's tool-call count.
-	const lines = renderFleetLines([task({ turns: 7, toolTurns: 6 })], ["scout"]);
+	const lines = renderFleetLines([task({ turns: 7, toolTurns: 6 })], ["scout"], "engaged");
 	assert.match(lines[1], /· turn 6 ·/);
 	assert.ok(!lines[1].includes("turn 7"));
 });
@@ -576,6 +603,7 @@ const populatedDelegateTool: any = (() => {
 			getCwd: () => process.cwd(),
 			getSignal: () => undefined,
 			onIdle: () => {},
+			getOrchestratorMode: () => "engaged",
 		},
 	);
 	return captured;
@@ -626,6 +654,7 @@ test("list action on an empty fleet reports an empty fleet", async () => {
 			getCwd: () => process.cwd(),
 			getSignal: () => undefined,
 			onIdle: () => {},
+			getOrchestratorMode: () => "engaged",
 		},
 	);
 	const out = await captured.execute("call-1", { action: "list" }, undefined, undefined, {});
@@ -710,6 +739,7 @@ const sessionsTool: any = (() => {
 			getCwd: () => process.cwd(),
 			getSignal: () => undefined,
 			onIdle: () => {},
+			getOrchestratorMode: () => "engaged",
 			getParentSessionFile: () => "PARENT",
 		},
 	);
@@ -736,6 +766,7 @@ test("sessions action lists the parent's linked child sessions", async () => {
 				getCwd: () => process.cwd(),
 				getSignal: () => undefined,
 				onIdle: () => {},
+				getOrchestratorMode: () => "engaged",
 				getParentSessionFile: () => parentFile,
 			},
 		);
@@ -759,6 +790,7 @@ test("sessions action with no parent session file degrades gracefully", async ()
 			getCwd: () => process.cwd(),
 			getSignal: () => undefined,
 			onIdle: () => {},
+			getOrchestratorMode: () => "engaged",
 			getParentSessionFile: () => undefined,
 		},
 	);

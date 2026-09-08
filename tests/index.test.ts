@@ -105,6 +105,22 @@ test("buildDelegateDeps: getChildExtensions reads the live config (session_start
 	assert.deepEqual(deps.getChildExtensions?.(), ["./my-ext.ts"]);
 });
 
+// ── Delegate deps wiring: fleet widget state label (ADR-0003) ────────────
+
+test("buildDelegateDeps: getOrchestratorMode maps enabled to engaged", () => {
+	const config: OrchestratorConfig = { ...DEFAULT_CONFIG, enabled: true };
+	const deps = buildDelegateDeps(() => config, () => {});
+	assert.equal(deps.getOrchestratorMode(), "engaged");
+});
+
+test("buildDelegateDeps: getOrchestratorMode reads the live config, so /orchestrator relabels without a rebuild", () => {
+	let config: OrchestratorConfig = { ...DEFAULT_CONFIG };
+	const deps = buildDelegateDeps(() => config, () => {});
+	assert.equal(deps.getOrchestratorMode(), "engaged");
+	config = { ...config, enabled: false };
+	assert.equal(deps.getOrchestratorMode(), "auto", "a disabled orchestrator must never be labelled engaged");
+});
+
 // ── Delegate deps wiring: parent prompt forwarding (forwardParentPrompt) ──
 
 test("buildDelegateDeps: getForwardParentPrompt returns the config value", () => {

@@ -120,9 +120,9 @@ function truncateWithEllipsis(text: string, max: number): string {
  * running count) with one indented line per running task, or the idle
  * fallback line when nothing runs.
  */
-export function renderFleetLines(tasks: RunningTask[], agentNames: string[]): string[] {
+export function renderFleetLines(tasks: RunningTask[], agentNames: string[], orchestratorMode: OrchestratorMode): string[] {
 	if (tasks.length === 0) {
-		return idleFleetWidgetLines(agentNames);
+		return idleFleetWidgetLines(agentNames, orchestratorMode);
 	}
 	const modes = new Set(tasks.map((t) => t.mode));
 	const mode = modes.size === 1 ? tasks[0].mode : "mixed";
@@ -147,9 +147,10 @@ export function renderFleetLines(tasks: RunningTask[], agentNames: string[]): st
 function updateFleetWidget(
 	ctx: { ui: { setWidget(id: string, lines: string[] | undefined, opts?: unknown): void } },
 	agentNames: string[],
+	orchestratorMode: OrchestratorMode,
 ): void {
 	if (!ctx.ui?.setWidget) return;
-	ctx.ui.setWidget("orchestrator-fleet", renderFleetLines([...runningTasks.values()], agentNames));
+	ctx.ui.setWidget("orchestrator-fleet", renderFleetLines([...runningTasks.values()], agentNames, orchestratorMode));
 }
 
 export function clearFleetWidget(ui: { setWidget(id: string, lines: string[] | undefined, opts?: unknown): void }): void {
@@ -160,8 +161,18 @@ export function clearFleetWidget(ui: { setWidget(id: string, lines: string[] | u
 	}
 }
 
-export function idleFleetWidgetLines(agentNames: string[]): string[] {
-	return [`orchestrator: engaged · fleet: ${agentNames.join(", ") || "(empty)"}`];
+/**
+ * Orchestrator state as shown in the fleet widget (ADR-0003). The label must
+ * never claim more than the gate actually does: `engaged` only when forcing is
+ * on (allow-list + policy active), `auto` when it is not — a disengaged
+ * orchestrator still answers `delegate`, the model just keeps its full toolset
+ * and delegates by choice. Before this, the idle line claimed `engaged` in both
+ * states, which read as a broken gate.
+ */
+export type OrchestratorMode = "engaged" | "auto";
+
+export function idleFleetWidgetLines(agentNames: string[], orchestratorMode: OrchestratorMode): string[] {
+	return [`orchestrator: ${orchestratorMode} · fleet: ${agentNames.join(", ") || "(empty)"}`];
 }
 
 // ── Live child-process registry (for session_shutdown reaping) ──────────────
@@ -1389,6 +1400,11 @@ export interface DelegateDeps {
 	getCwd: () => string;
 	getSignal: () => AbortSignal | undefined;
 	onIdle: () => void;
+	/** Current orchestrator state for the fleet widget label (ADR-0003):
+	 *  `engaged` while the gate forces delegation, `auto` when it does not.
+	 *  Required — a defaulted label would put the widget back to guessing, and
+	 *  a guessed label is exactly the lie this reports. */
+	getOrchestratorMode: () => OrchestratorMode;
 	/** Default turn budget from orchestrator.json `maxTurns` (ADR-0006);
 	 *  per-agent frontmatter `maxTurns` overrides this. Falls back to 50. */
 	getMaxTurns?: () => number;
@@ -1530,7 +1546,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 				(mode: "single" | "parallel" | "chain") =>
 				(results: SingleResult[]): SubagentDetails => ({ mode, results });
 
-			const fleetChanged = () => updateFleetWidget(ctx, agents.map((a) => a.name));
+			const fleetChanged = () => updateFleetWidget(ctx, agents.map((a) => a.name), deps.getOrchestratorMode());
 			// Unique per invocation: concurrent delegate calls must not collide on
 			// runningTasks keys, or the fleet header undercounts running agents.
 			const runId = nextFleetRunId();
