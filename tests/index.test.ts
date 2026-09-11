@@ -15,10 +15,13 @@ import {
 	installChildParentPrompt,
 	installChildToolGate,
 	parseBlockedToolsEnv,
+	createPolicyTextCache,
 	stripDuplicatedParentSegments,
 	withParentPrompt,
 } from "../index.ts";
-import { DEFAULT_CONFIG, type OrchestratorConfig } from "../config.ts";
+import { DEFAULT_CONFIG, type DiscoveredTool, type OrchestratorConfig } from "../config.ts";
+import { buildPolicy } from "../policy.ts";
+import type { AgentConfig } from "../agents.ts";
 
 test("parseBlockedToolsEnv: empty string → no matchers (gate not installed)", () => {
 	assert.deepEqual(parseBlockedToolsEnv(""), []);
@@ -336,4 +339,42 @@ test("installChildParentPrompt: unreadable file is a pass-through (undefined)", 
 	} finally {
 		delete process.env.PI_ORCHESTRATOR_PARENT_PROMPT_FILE;
 	}
+});
+
+// ── Policy text cache (ADR-0013) ───────────────────────────────────────────
+
+test("createPolicyTextCache: computed lazily once, reused verbatim across turns", () => {
+	let calls = 0;
+	const cache = createPolicyTextCache(() => {
+		calls += 1;
+		return `policy-v${calls}`;
+	});
+	assert.equal(cache.get(), "policy-v1");
+	assert.equal(cache.get(), "policy-v1", "the same text must be re-appended next turn without recomputing");
+	assert.equal(calls, 1);
+});
+
+test("createPolicyTextCache: invalidate at an episode boundary forces a recompute", () => {
+	let calls = 0;
+	const cache = createPolicyTextCache(() => `policy-v${++calls}`);
+	assert.equal(cache.get(), "policy-v1");
+	cache.invalidate(); // setEngaged / session_start
+	assert.equal(cache.get(), "policy-v2", "re-engaging must regenerate the text (fresh fleet list)");
+	assert.equal(calls, 2);
+});
+
+test("buildPolicy: deterministic for identical inputs (ADR-0013 cache premise)", () => {
+	const agents: AgentConfig[] = [
+		{ name: "scout", description: "read-only recon", systemPrompt: "", source: "builtin", filePath: "x.md" },
+		{
+			name: "worker",
+			description: "general-purpose",
+			tools: ["read", "bash"],
+			systemPrompt: "worker prompt",
+			source: "builtin",
+			filePath: "y.md",
+		},
+	];
+	const kept: DiscoveredTool[] = [{ extensionId: "ext:x", names: ["read"], partial: false }];
+	assert.equal(buildPolicy(agents, DEFAULT_CONFIG, kept), buildPolicy(agents, DEFAULT_CONFIG, kept));
 });

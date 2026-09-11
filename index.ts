@@ -6,7 +6,8 @@
  * Engagement (default ON, persistent toggle via /orchestrator):
  *   1. Tools outside the keep-list are removed from the active set
  *      (re-applied every turn to catch dynamically registered tools).
- *   2. A delegation policy is appended to the system prompt every turn.
+ *   2. A delegation policy is appended to the system prompt every turn —
+ *      the same cached text for the whole engagement episode (ADR-0013).
  *   3. A hard gate blocks any non-keep-list tool call with guidance to delegate.
  *
  * Child mode (PI_ORCHESTRATOR_CHILD=1): the extension self-disables and only
@@ -237,6 +238,28 @@ function installChildWatchdog(): void {
 let parentSystemPrompt: string | undefined;
 
 /**
+ * Policy text cache (ADR-0013): pi rebuilds the system prompt every turn, so
+ * the policy append itself must happen per turn — but rebuilding the TEXT
+ * each turn bought nothing (byte-identical output unless the fleet or
+ * keep-list changed) and silently invalidated the provider prompt-cache
+ * prefix on mid-session fleet changes. The text is therefore computed lazily
+ * on the first engaged turn (so tool discovery is complete) and reused
+ * verbatim for the whole engagement episode. Exported for unit tests
+ * (tests/index.test.ts).
+ */
+export function createPolicyTextCache(
+	compute: () => string,
+): { get: () => string; invalidate: () => void } {
+	let cached: string | undefined;
+	return {
+		get: () => (cached ??= compute()),
+		invalidate: () => {
+			cached = undefined;
+		},
+	};
+}
+
+/**
  * Deps for the delegate tool. Takes a live config getter (session_start
  * reassigns `config` from disk) so every dep reads the current values, never
  * a stale copy. Exported for unit tests (tests/index.test.ts).
@@ -298,6 +321,28 @@ export default function (pi: any) {
 	// applyReduction() so late-registered tools are picked up.
 	let discovered: DiscoveredTool[] = [];
 
+	// Policy text for the current engagement episode (ADR-0013). Computed
+	// lazily on the first engaged turn — applyReduction() has just refreshed
+	// `discovered`, so tool discovery is complete — then reused verbatim.
+	function computePolicyText(): string {
+		const agents: AgentConfig[] = discoverAgents(config);
+		// Policy text must only advertise tools the gate actually allows: under
+		// keep-list-only (non-empty keepTools) most discovered extensions
+		// are not kept, so filter the discovered groups down to the kept tools.
+		const effective = effectiveKeepTools(config.keepTools, discovered);
+		const keptDiscovered = discovered
+			.map((d) => ({
+				...d,
+				// source: d.extensionId makes deriveExtensionId return the same id
+				// discoverKeptTools derived (d.names excludes shadow-skipped tools).
+				names: d.names.filter((n) => toolIsKept({ name: n, sourceInfo: { source: d.extensionId } }, effective)),
+			}))
+			.filter((d) => d.names.length > 0);
+		return buildPolicy(agents, config, keptDiscovered);
+	}
+
+	const policyCache = createPolicyTextCache(computePolicyText);
+
 	function updateIdleWidget(): void {
 		if (!lastUi?.setWidget) return;
 		// Clobber guard: never repaint the (idle) fleet widget while a subagent
@@ -339,6 +384,9 @@ export default function (pi: any) {
 
 	function setEngaged(next: boolean, ctx?: any, opts?: { persist?: boolean; quiet?: boolean }): void {
 		engaged = next;
+		// Episode boundary (ADR-0013): policy text is recomputed lazily on the
+		// next engaged turn — fresh fleet list when re-engaging.
+		policyCache.invalidate();
 		config.enabled = next;
 		if (opts?.persist !== false) {
 			try {
@@ -364,6 +412,7 @@ export default function (pi: any) {
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		config = loadConfig();
 		parentSystemPrompt = undefined; // Defensive: don't forward a stale prompt across sessions
+		policyCache.invalidate(); // Fresh policy text for the new session's episode (ADR-0013)
 		engaged = config.enabled;
 		if (ctx?.ui) lastUi = ctx.ui;
 
@@ -393,6 +442,10 @@ export default function (pi: any) {
 	});
 
 	// ── Policy injection + tool-repair each turn ───────────────────────────
+	// The append must stay per-turn (pi rebuilds the system prompt per turn;
+	// a one-time append would disappear from the next turn), but the policy
+	// TEXT is cached per engagement episode (ADR-0013): identical text every
+	// turn keeps the provider prompt-cache prefix stable.
 
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
 		if (!engaged) return;
@@ -405,20 +458,9 @@ export default function (pi: any) {
 		// (e.g. by other extensions) and any re-enablement that happened.
 		applyReduction();
 
-		const agents: AgentConfig[] = discoverAgents(config);
-		// Policy text must only advertise tools the gate actually allows: under
-		// keep-list-only (non-empty keepTools) most discovered extensions
-		// are not kept, so filter the discovered groups down to the kept tools.
-		const effective = effectiveKeepTools(config.keepTools, discovered);
-		const keptDiscovered = discovered
-			.map((d) => ({
-				...d,
-				// source: d.extensionId makes deriveExtensionId return the same id
-				// discoverKeptTools derived (d.names excludes shadow-skipped tools).
-				names: d.names.filter((n) => toolIsKept({ name: n, sourceInfo: { source: d.extensionId } }, effective)),
-			}))
-			.filter((d) => d.names.length > 0);
-		return { systemPrompt: `${event.systemPrompt}\n\n${buildPolicy(agents, config, keptDiscovered)}` };
+		return { systemPrompt: `${event.systemPrompt}
+
+${policyCache.get()}` };
 	});
 
 	// ── Hard gate (ADR-0001) ────────────────────────────────────────────────

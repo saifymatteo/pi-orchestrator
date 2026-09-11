@@ -1,9 +1,13 @@
 /**
- * Delegation policy injected into the system prompt on every turn
- * while orchestration is engaged (ADR-0001).
+ * Delegation policy appended to the system prompt on every turn while
+ * orchestration is engaged (ADR-0001).
  *
- * Text is generated from the discovered fleet and the tools actually kept
- * (ADR-0004): no other-package tool names and no fleet names are hardcoded.
+ * The TEXT is computed once per engagement episode and cached (ADR-0013):
+ * pi rebuilds the system prompt each turn, so the append must stay
+ * per-turn, but reusing identical text keeps the provider prompt-cache
+ * prefix stable even when the fleet changes mid-session. Generated from
+ * the discovered fleet and the tools actually kept (ADR-0004): no
+ * other-package tool names and no fleet names are hardcoded.
  */
 
 import type { AgentConfig } from "./agents.ts";

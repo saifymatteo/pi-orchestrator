@@ -37,7 +37,7 @@ pi -e <path-to-your-clone>/pi-orchestrator/index.ts
 
 | Layer | Mechanism |
 |---|---|
-| Policy | `before_agent_start` appends a delegation policy every turn, generated from the discovered fleet and the tools actually kept (ADR-0004) |
+| Policy | `before_agent_start` appends a delegation policy every turn while engaged — the same cached text each turn, computed once per engagement episode from the discovered fleet and the tools actually kept (ADR-0004, ADR-0013) |
 | Reduction | `setActiveTools` keeps only the keep-list (re-applied every turn to catch late-registered tools) |
 | Gate | `tool_call` blocks anything not on the keep-list, with guidance to delegate (ADR-0001) |
 | Delegate tool | spawns `pi --mode rpc` children with `PI_ORCHESTRATOR_CHILD=1` (ADR-0002); persistent sub-sessions by default — file-per-run in the parent's session dir, linked via `new_session {parentSession}` (ADR-0011) |
@@ -214,7 +214,7 @@ Child processes inherit installed extensions automatically through pi's own exte
 
 ## Policy and fleet text
 
-The delegation policy is generated each turn from what is actually installed (ADR-0004): the allow-list names the tools currently retained, the fleet section lists the discovered agents and their tool restrictions, and the typical-flows example is composed from the discovered agent names. No other-package tool names or fleet names are hardcoded, so two installs with different packages produce slightly different policy text. `builtinFleet: false`, `hidden: true`, and project agents all change what the policy says.
+The delegation policy text is computed once per engagement episode from what is actually installed (ADR-0004) and then reused verbatim every turn while engaged (ADR-0013): the allow-list names the tools retained at compute time, the fleet section lists the agents discovered at that point, and the typical-flows example is composed from the discovered agent names. The text is regenerated when engagement turns on again (session start with `enabled: true`, or `/orchestrator` re-engage). Mid-session agent additions are covered by the delegate tool's `list` action and the schema enum, not by prompt rewrites. No other-package tool names or fleet names are hardcoded, so two installs with different packages produce slightly different policy text. `builtinFleet: false`, `hidden: true`, and project agents all change what the policy says.
 
 ## Files
 

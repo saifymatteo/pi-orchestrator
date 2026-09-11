@@ -1,0 +1,9 @@
+# Cached policy text per engagement episode
+
+The delegation policy used to be rebuilt every turn from the live fleet and keep-list. Between changes the rebuilt text was byte-identical, so the per-turn recompute bought nothing — and when the fleet or keep-list *did* change mid-session, the policy tail of the system prompt changed with it, invalidating the provider prompt-cache prefix from that point onward (in practice the whole conversation, since the policy sits inside the system prompt at the head of the request). We now compute the policy text once per engagement episode — lazily at the first engaged turn (so tool discovery is complete for the allow-list section), invalidated on `/orchestrator` toggle and on `session_start` — and re-append that cached text every turn while engaged. pi rebuilds the system prompt per turn, so the append itself must stay per-turn; only the text is frozen. Accepted cost: the fleet list in the prompt goes stale within an episode; mid-session agent discovery stays covered by the delegate tool's `list` action and the schema enum (ADR-0010), and the Gate (ADR-0001) enforces the real allow-list regardless of prompt text. ADR-0001's two-layer decision and ADR-0004's generation-from-discovery are unchanged — generation just happens once per episode.
+
+## Considered options
+
+- Rebuild every turn (rejected: byte-identical output in the common case; a mid-session fleet/keep-list change silently invalidated the conversation's prompt cache)
+- Literal inject-once at the first turn only (rejected: broken — pi rebuilds the system prompt per turn, so a one-time append disappears from the next turn onward and compliance drifts with no policy in view)
+- One-time message instead of a system-prompt block (rejected: buried under tool results as the conversation grows; salience loss)
