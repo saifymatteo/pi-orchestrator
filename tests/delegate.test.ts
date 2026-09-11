@@ -14,7 +14,8 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 
 import { idleFleetWidgetLines, renderFleetLines } from "../delegate.ts";
-import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId, parallelProgress, runStatus, taskStatus } from "../delegate.ts";
+import type { Message } from "@earendil-works/pi-ai";
+import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId, parallelProgress, runStatus, taskStatus, type SingleResult } from "../delegate.ts";
 import { buildChildSpawnArgs, expandBlockedToolsToNames, stableSessionId } from "../delegate.ts";
 
 // Provider-neutral model placeholders and OS-native synthetic paths — the
@@ -24,7 +25,7 @@ const TEST_MODEL_ALT = "test/other-model";
 
 /** Minimal RunningTask-shaped fixture (mode is the only other required field).
  *  toolTurns defaults to turns (1); tests that need a mismatch override it. */
-function task(overrides = {}) {
+function task(overrides: Partial<{ id: string; agent: string; task: string; mode: "single" | "parallel" | "chain"; turns: number; toolTurns: number; contextTokens: number; inputTokens: number; outputTokens: number }> = {}): { id: string; agent: string; task: string; mode: "single" | "parallel" | "chain"; turns: number; toolTurns: number; contextTokens: number; inputTokens: number; outputTokens: number } {
 	return {
 		id: "task0",
 		agent: "scout",
@@ -183,18 +184,18 @@ const delegateTool: any = (() => {
 
 const passthroughTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
-function singleResult(overrides: Record<string, unknown> = {}) {
+function singleResult(overrides: Partial<Omit<SingleResult, "messages">> & { messages?: unknown[] } = {}): SingleResult {
 	return {
 		agent: "worker",
 		agentSource: "builtin",
 		task: "do a thing",
 		exitCode: 0,
 		completedNormally: false,
-		messages: [],
+		messages: [] as Message[],
 		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0, toolTurns: 0 },
 		...overrides,
-	};
+	} as SingleResult;
 }
 
 function renderSingleCollapsed(result: any, options: Record<string, unknown> = {}, context: any = undefined): string {
@@ -556,7 +557,7 @@ test("buildDelegateParams: non-empty fleet publishes an enum on every agent-name
 	const params = buildDelegateParams(FLEET);
 	for (const schema of [agentSchemaOf(params), taskItemAgentSchemaOf(params), chainStepAgentSchemaOf(params)]) {
 		assert.deepEqual(schema.enum, FLEET);
-		assert.ok(schema.description.includes("planner, reviewer, scout, worker"), schema.description);
+		assert.ok((schema as any).description.includes("planner, reviewer, scout, worker"), (schema as any).description);
 	}
 });
 
@@ -569,12 +570,12 @@ test("buildDelegateParams: empty fleet omits the enum (free-form, no empty-enum 
 
 test("buildDelegateParams: discovery action is enum-constrained to list/sessions", () => {
 	const params = buildDelegateParams(FLEET);
-	assert.deepEqual(params.properties.action.enum, ["list", "sessions"]);
+	assert.deepEqual((params.properties.action as any).enum, ["list", "sessions"]);
 });
 
 test("agentNameParam: description carries the valid names so models without enum support still see them", () => {
 	const schema = agentNameParam("Agent name (single mode)", FLEET);
-	assert.match(schema.description, /Valid names: planner, reviewer, scout, worker\./);
+	assert.match((schema as any).description, /Valid names: planner, reviewer, scout, worker\./);
 });
 
 // ── The registered tool: schema + list action ───────────────────────────────
@@ -590,6 +591,8 @@ const populatedDelegateTool: any = (() => {
 					description: "Fast read-only codebase recon",
 					tools: ["read", "grep"],
 					source: "builtin",
+					systemPrompt: "Scout system prompt",
+					filePath: "builtin:scout",
 				},
 				{
 					name: "worker",
@@ -597,6 +600,8 @@ const populatedDelegateTool: any = (() => {
 					source: "project",
 					model: TEST_MODEL,
 					maxTurns: 20,
+					systemPrompt: "Worker system prompt",
+					filePath: "project:worker",
 				},
 			],
 			getDispatchDefaults: () => ({}),

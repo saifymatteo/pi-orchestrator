@@ -36,15 +36,22 @@
     "test": "tests"
   },
   "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=0.84.0",
     "@earendil-works/pi-ai": ">=0.84.0",
     "@earendil-works/pi-coding-agent": ">=0.84.0",
-    "@earendil-works/pi-tui": ">=0.84.0",
-    "@earendil-works/pi-agent-core": ">=0.84.0"
+    "@earendil-works/pi-tui": ">=0.84.0"
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.52"
   },
   "scripts": {
-    "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts tests/index.test.ts tests/rpc-waiters.test.ts"
+    "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts tests/index.test.ts tests/rpc-waiters.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
   }
 }

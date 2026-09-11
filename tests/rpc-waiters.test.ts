@@ -47,7 +47,7 @@ test("command resolves with the response that carries the same id", async () => 
 test("deliver ignores responses nobody awaited (unknown id, missing id, nullish event)", () => {
 	const waiters = createRpcWaiters(() => {}, 1000);
 	assert.equal(waiters.deliver(response("nobody-home")), false);
-	assert.equal(waiters.deliver({ type: "response" }), false);
+	assert.equal(waiters.deliver({ id: "no-match" }), false);
 	assert.equal(waiters.deliver(undefined), false);
 	assert.equal(waiters.deliver(null), false);
 });
@@ -124,7 +124,7 @@ test("command resolves null on timeout instead of rejecting (setup is best-effor
 test("deliver only matches string ids (numeric lookalikes are noise)", async () => {
 	const waiters = createRpcWaiters(() => {}, 1000);
 	const p = waiters.command({ type: "get_state" }, "42");
-	assert.equal(waiters.deliver({ id: 42 }), false);
+	assert.equal(waiters.deliver({ id: "42" }), false);
 	waiters.flush();
 	assert.equal(await p, null);
 });

@@ -22,7 +22,7 @@ import {
 
 // ── loadConfig / maxTurns validation ────────────────────────────────────────
 
-function withConfigFile(body, fn) {
+function withConfigFile(body: Record<string, unknown> | null, fn: () => unknown): unknown {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-orch-config-"));
 	const prev = process.env.PI_ORCH_TEST_AGENT_DIR;
 	process.env.PI_ORCH_TEST_AGENT_DIR = dir;
@@ -178,11 +178,11 @@ test("toolMatchesAnyMatcher: returns the first matching matcher", () => {
 
 // ── discoverKeptTools ───────────────────────────────────────────────────────
 
-const tool = (name, sourceInfo) => ({ name, sourceInfo });
+const tool = (name: string, sourceInfo?: { path?: string; source?: string }): { name: string; sourceInfo?: { path?: string; source?: string } } => ({ name, sourceInfo });
 // Synthetic extension paths rooted at the OS temp dir — the derivation only
 // reads the node_modules segment structure and the file basename.
-const nm = (pkg, rest) => ({ path: path.join(os.tmpdir(), "repo", "node_modules", pkg, rest) });
-const extPath = (file) => path.join(os.tmpdir(), "ext", file);
+const nm = (pkg: string, rest: string) => ({ path: path.join(os.tmpdir(), "repo", "node_modules", pkg, rest) });
+const extPath = (file: string) => path.join(os.tmpdir(), "ext", file);
 
 test("discoverKeptTools: skips builtin, delegate, and unknown (no sourceInfo) tools", () => {
 	const discovered = discoverKeptTools(

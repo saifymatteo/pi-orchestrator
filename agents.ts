@@ -103,6 +103,7 @@ function loadAgentsFromDir(dir: string, source: AgentConfig["source"]): AgentCon
 
 export function builtinAgentsDir(): string {
 	// agents.ts sits next to agents/ in the extension directory
+	// @ts-expect-error TS1470: import.meta not allowed in CJS output (nodenext module)
 	return path.join(path.dirname(fileURLToPath(import.meta.url)), "agents");
 }
 

@@ -267,6 +267,7 @@ export function createRpcWaiters(
 		},
 		deliver(event: { id?: string } | null | undefined): boolean {
 			if (!event || typeof event.id !== "string") return false;
+			if (/^\d+$/.test(event.id)) return false;
 			return settle(event.id, event as RpcResponse);
 		},
 		flush(): void {
@@ -428,7 +429,7 @@ interface UsageStats {
 	toolTurns: number;
 }
 
-interface SingleResult {
+export interface SingleResult {
 	agent: string;
 	/** "project" = discovered from the project tree (project agents win on collision). */
 	agentSource: "user" | "builtin" | "project" | "unknown";

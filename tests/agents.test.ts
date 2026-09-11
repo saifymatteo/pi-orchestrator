@@ -14,11 +14,11 @@ import * as path from "node:path";
 
 import { discoverAgents, projectAgentDirs } from "../agents.ts";
 
-function tempRoot(label) {
+function tempRoot(label: string) {
 	return fs.mkdtempSync(path.join(os.tmpdir(), `pi-orch-agents-${label}-`));
 }
 
-function writeAgent(dir, file, frontmatter, body = "Body.") {
+function writeAgent(dir: string, file: string, frontmatter: Record<string, unknown>, body = "Body.") {
 	fs.mkdirSync(dir, { recursive: true });
 	const lines = Object.entries(frontmatter)
 		.map(([k, v]) => `${k}: ${v}`)
@@ -27,7 +27,7 @@ function writeAgent(dir, file, frontmatter, body = "Body.") {
 }
 
 /** Points the stub getAgentDir() at a temp "user" dir for the test duration. */
-function withUserDir(userRoot, fn) {
+function withUserDir<T>(userRoot: string, fn: () => T): T {
 	const prev = process.env.PI_ORCH_TEST_AGENT_DIR;
 	process.env.PI_ORCH_TEST_AGENT_DIR = userRoot;
 	try {
@@ -38,7 +38,7 @@ function withUserDir(userRoot, fn) {
 	}
 }
 
-const baseConfig = { enabled: true, keepTools: ["delegate"], builtinFleet: false, modelOverrides: {}, maxTurns: 50 };
+const baseConfig: import("../config.ts").OrchestratorConfig = { enabled: true, keepTools: ["delegate"], childBlockedTools: [], childExtensions: [], forwardParentPrompt: true, builtinFleet: false, modelOverrides: {}, maxTurns: 50, stallTimeoutMs: 600_000, childSessions: true };
 
 // ── projectAgentDirs ────────────────────────────────────────────────────────
 
@@ -83,10 +83,18 @@ test("discoverAgents: maxTurns accepts 7 and rejects 'seven', 0, 1.5 (no coercio
 	writeAgent(agentsDir, "d.md", { name: "d", description: "float", maxTurns: 1.5 });
 
 	const byName = new Map(withUserDir(user, () => discoverAgents(baseConfig, user)).map((a) => [a.name, a]));
-	assert.equal(byName.get("a").maxTurns, 7);
-	assert.equal(byName.get("b").maxTurns, undefined);
-	assert.equal(byName.get("c").maxTurns, undefined);
-	assert.equal(byName.get("d").maxTurns, undefined);
+	const a1 = byName.get("a");
+	if (!a1) throw new Error("agent a missing");
+	assert.equal(a1.maxTurns, 7);
+	const b1 = byName.get("b");
+	if (!b1) throw new Error("agent b missing");
+	assert.equal(b1.maxTurns, undefined);
+	const c1 = byName.get("c");
+	if (!c1) throw new Error("agent c missing");
+	assert.equal(c1.maxTurns, undefined);
+	const d1 = byName.get("d");
+	if (!d1) throw new Error("agent d missing");
+	assert.equal(d1.maxTurns, undefined);
 	fs.rmSync(user, { recursive: true, force: true });
 });
 
@@ -98,9 +106,15 @@ test("discoverAgents: blockTools parses arrays and comma strings, absent means u
 	writeAgent(agentsDir, "c.md", { name: "c", description: "absent" });
 
 	const byName = new Map(withUserDir(user, () => discoverAgents(baseConfig, user)).map((a) => [a.name, a]));
-	assert.deepEqual(byName.get("a").blockTools, ["bash", "grep"]);
-	assert.deepEqual(byName.get("b").blockTools, ["bash", "grep"]);
-	assert.equal(byName.get("c").blockTools, undefined);
+	const a2 = byName.get("a");
+	if (!a2) throw new Error("agent a missing");
+	assert.deepEqual(a2.blockTools, ["bash", "grep"]);
+	const b2 = byName.get("b");
+	if (!b2) throw new Error("agent b missing");
+	assert.deepEqual(b2.blockTools, ["bash", "grep"]);
+	const c2 = byName.get("c");
+	if (!c2) throw new Error("agent c missing");
+	assert.equal(c2.blockTools, undefined);
 	fs.rmSync(user, { recursive: true, force: true });
 });
 
@@ -116,6 +130,7 @@ test("discoverAgents: project beats user, and .pi/agents beats .agents/agents at
 
 	const agents = withUserDir(user, () => discoverAgents(baseConfig, project));
 	const dup = agents.find((a) => a.name === "dup");
+	if (!dup) throw new Error("dup agent missing");
 	assert.equal(dup.source, "project");
 	assert.equal(dup.description, "project .pi"); // .pi/agents wins over .agents/agents
 	// Merge precedence applies to blockTools too: the project copy replaces the user copy wholesale.
