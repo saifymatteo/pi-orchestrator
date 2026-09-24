@@ -14,7 +14,19 @@ A subagent: a fresh child `pi` process with an isolated context window and the f
 The set of agent definitions the Orchestrator can delegate to. Shipped fleet: **scout** (read-only recon), **planner** (read-only planning), **worker** (general-purpose, full tools), **reviewer** (read-only + shell, code review). Builtins ship as markdown files with YAML frontmatter in the extension's own `agents/` directory; user-installed agents live in `~/.pi/agent/agents/`.
 
 ### Delegate (tool)
-The single tool the Orchestrator uses to hand work to the Fleet. Modes: single (`agent` + `task`), parallel (`tasks[]`), chain (`chain[]` with `{previous}` placeholder), discovery (`{action: "list"}` returns the live fleet, `{action: "sessions"}` lists the session's subagent transcripts — both without spawning anything). Agent names are published as a schema enum of the fleet discovered at load (see ADR-0010). Always active, never blocked.
+The single tool the Orchestrator uses to hand work to the Fleet. Modes: single (`agent` + `task`), parallel (`tasks[]`), chain (`chain[]` with `{previous}` placeholder), and discovery (`{action: "list"}` returns the live fleet, `{action: "sessions"}` lists the session's subagent transcripts, `{action: "status"}` lists live runs, `{action: "cancel"}` kills one run). Dispatch is asynchronous by default (see ADR-0014): the call returns an Accepted result at once, and the outcome follows via Result delivery when the Worker settles; `async: false` blocks until the final result, and chain mode is always blocking. Agent names are published as a schema enum of the fleet discovered at load (see ADR-0010). Always active, never blocked.
+
+### Accepted
+The immediate result of an asynchronous delegate dispatch: confirmation, with a run id, that the task was taken — before any work has finished. Distinct from the task's eventual outcome, which arrives later via Result delivery. A synchronous validation error (unknown agent, invalid parameters) is never an acceptance.
+
+### Run id
+The unique identifier a delegate dispatch receives at acceptance. Every later signal about that dispatch — a delivered result, a status listing, a cancel — echoes the same id, so acceptance and delivery stay correlated across turns.
+
+### Result delivery
+The push of a settled Worker's outcome into the Orchestrator's conversation: it starts a new turn when the Orchestrator is idle and joins the queue when it is mid-conversation. A delivery carries the three-state run status (see ADR-0012); failure after acceptance is delivered, never silent. The Orchestrator reacts to deliveries; it does not poll for them.
+
+### Cancel
+The explicit kill of one running delegation, as distinct from aborting the session, which kills the whole fleet. A cancelled run's transcript still lands in its Sub-session record.
 
 ### Sub-session (persistent subagent session)
 The persistent pi session each delegate dispatch writes for its subagent (ADR-0011). File-per-run, stored in the parent's session directory, named `orch: <agent> — <task>`, and linked to the parent session via pi's session-format v3 `parentSession` header (written by the parent's RPC `new_session {parentSession}` before the task prompt). The delegate result ends with the session path; `delegate({action: "sessions"})` lists all of them from disk. Config: `childSessions` (default `true`).

@@ -32,7 +32,7 @@ import {
 	type OrchestratorConfig,
 } from "./config.ts";
 import * as fs from "node:fs";
-import { clearFleetWidget, hasRunningTasks, idleFleetWidgetLines, killAllFleet, registerDelegateTool, type DelegateDeps } from "./delegate.ts";
+import { abortActiveRuns, clearFleetWidget, hasRunningTasks, idleFleetWidgetLines, killAllFleet, registerDelegateTool, type DelegateDeps } from "./delegate.ts";
 import { buildPolicy } from "./policy.ts";
 import { truncateToWidth } from "./width.ts";
 import type { AgentConfig } from "./agents.ts";
@@ -401,7 +401,7 @@ export default function (pi: any) {
 			ctx.ui.notify(
 				next
 					? `Orchestrator ENGAGED · fleet: ${discoverAgents(config).map((a) => a.name).join(", ") || "(empty)"}`
-					: "Orchestrator: AUTO — full toolset restored, delegate still on demand (persisted to orchestrator.json)",
+					: "Orchestrator: AUTO — full toolset restored, delegate still on demand (persisted to orchestrator.jsonc)",
 				next ? "info" : "warning",
 			);
 		}
@@ -425,7 +425,7 @@ export default function (pi: any) {
 		if (!engaged && ctx?.ui?.notify) {
 			// Defuse the "why isn't it forcing?" surprise (ADR-0003)
 			ctx.ui.notify(
-				"Orchestrator: AUTO (orchestrator.json enabled:false) — full toolset, delegate on demand. Run /orchestrator to engage.",
+				"Orchestrator: AUTO (orchestrator.jsonc enabled:false) — full toolset, delegate on demand. Run /orchestrator to engage.",
 				"warning",
 			);
 		}
@@ -433,6 +433,8 @@ export default function (pi: any) {
 
 	pi.on("session_shutdown", async () => {
 		// User requirement: never leave fleet agents running in the background.
+		// Mark first so dying runs skip result delivery (no pushes during teardown).
+		abortActiveRuns();
 		killAllFleet();
 		try {
 			if (lastUi) clearFleetWidget(lastUi);
@@ -492,7 +494,7 @@ ${policyCache.get()}` };
 	// ── Commands ────────────────────────────────────────────────────────────
 
 	pi.registerCommand("orchestrator", {
-		description: "Toggle orchestrator mode (persisted to orchestrator.json)",
+		description: "Toggle orchestrator mode (persisted to orchestrator.jsonc)",
 		handler: async (_args: string, ctx: any) => {
 			if (ctx?.ui) lastUi = ctx.ui;
 			setEngaged(!engaged, ctx);
@@ -504,7 +506,7 @@ ${policyCache.get()}` };
 		handler: async (_args: string, ctx: any) => {
 			if (ctx?.ui) lastUi = ctx.ui;
 			if (ctx?.mode !== "tui") {
-				ctx?.ui?.notify("/orchestrator-tools requires TUI mode — edit ~/.pi/agent/orchestrator.json instead", "warning");
+				ctx?.ui?.notify("/orchestrator-tools requires TUI mode — edit ~/.pi/agent/orchestrator.jsonc instead", "warning");
 				return;
 			}
 

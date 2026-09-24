@@ -16,6 +16,7 @@ import {
 	discoverKeptTools,
 	effectiveKeepTools,
 	loadConfig,
+	saveConfig,
 	toolIsKept,
 	toolMatchesAnyMatcher,
 } from "../config.ts";
@@ -143,6 +144,123 @@ test("loadConfig: forwardParentPrompt explicit false is respected", () => {
 test("loadConfig: forwardParentPrompt non-boolean ('yes') falls back to true", () => {
 	withConfigFile({ forwardParentPrompt: "yes" }, () => {
 		assert.equal(loadConfig().forwardParentPrompt, true);
+	});
+});
+
+// ── JSONC config (ADR-0015): comments, legacy fallback, migration ──────────
+
+/** Like withConfigFile but for explicit filename/content pairs. */
+function withConfigFiles(files: Record<string, string | null>, fn: () => unknown): unknown {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-orch-config-"));
+	const prev = process.env.PI_ORCH_TEST_AGENT_DIR;
+	process.env.PI_ORCH_TEST_AGENT_DIR = dir;
+	try {
+		for (const [name, body] of Object.entries(files)) {
+			if (body !== null) fs.writeFileSync(path.join(dir, name), body, "utf-8");
+		}
+		return fn();
+	} finally {
+		if (prev === undefined) delete process.env.PI_ORCH_TEST_AGENT_DIR;
+		else process.env.PI_ORCH_TEST_AGENT_DIR = prev;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+const JSONC_WITH_COMMENTS = `{
+	// Orchestrator configuration.
+	"enabled": true, // engaged by default
+	"maxTurns": 30, // per-subagent budget
+	"keepTools": [
+		"delegate", // always kept anyway
+		"todo",
+	],
+	"childBlockedTools": ["bash"],
+}`;
+
+test("loadConfig: orchestrator.jsonc parses with comments and trailing commas (ADR-0015)", () => {
+	withConfigFiles({ "orchestrator.jsonc": JSONC_WITH_COMMENTS }, () => {
+		const config = loadConfig();
+		assert.equal(config.enabled, true);
+		assert.equal(config.maxTurns, 30);
+		assert.deepEqual(config.keepTools, ["delegate", "todo"]);
+		assert.deepEqual(config.childBlockedTools, ["bash"]);
+	});
+});
+
+test("loadConfig: legacy orchestrator.json still works when no .jsonc exists (fallback)", () => {
+	withConfigFiles({ "orchestrator.json": JSON.stringify({ maxTurns: 12 }) }, () => {
+		assert.equal(loadConfig().maxTurns, 12);
+	});
+});
+
+test("loadConfig: orchestrator.jsonc wins over legacy orchestrator.json when both exist", () => {
+	withConfigFiles(
+		{
+			"orchestrator.json": JSON.stringify({ maxTurns: 12 }),
+			"orchestrator.jsonc": JSONC_WITH_COMMENTS,
+		},
+		() => {
+			assert.equal(loadConfig().maxTurns, 30);
+		},
+	);
+});
+
+test("loadConfig: malformed JSONC falls back to defaults without throwing", () => {
+	withConfigFiles({ "orchestrator.jsonc": "{ // comment with no closing brace" }, () => {
+		assert.equal(loadConfig().maxTurns, 50);
+		assert.equal(loadConfig().enabled, true);
+	});
+});
+
+test("saveConfig: comments survive a save that changes one key (round trip)", () => {
+	withConfigFiles({ "orchestrator.jsonc": JSONC_WITH_COMMENTS }, () => {
+		const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+		const config = loadConfig();
+		config.maxTurns = 77;
+		saveConfig(config);
+
+		assert.equal(fs.existsSync(path.join(dir, "orchestrator.json")), false, "save must target .jsonc, not the legacy name");
+		const raw = fs.readFileSync(path.join(dir, "orchestrator.jsonc"), "utf-8");
+		assert.match(raw, /Orchestrator configuration/, "header comment must survive");
+		assert.match(raw, /engaged by default/, "inline comment must survive");
+		assert.match(raw, /always kept anyway/, "array element comment must survive");
+		assert.match(raw, /"maxTurns": 77/, "changed key must be persisted in the comment file itself");
+		assert.equal(loadConfig().maxTurns, 77);
+	});
+});
+
+test("saveConfig: legacy orchestrator.json migrates to orchestrator.jsonc on first save (removed only after write)", () => {
+	withConfigFiles({ "orchestrator.json": JSON.stringify({ maxTurns: 12 }) }, () => {
+		const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+		const config = loadConfig();
+		config.maxTurns = 21;
+		saveConfig(config);
+
+		assert.equal(fs.existsSync(path.join(dir, "orchestrator.jsonc")), true, ".jsonc must be written");
+		assert.equal(fs.existsSync(path.join(dir, "orchestrator.json")), false, "legacy .json must be removed after successful write");
+		assert.equal(loadConfig().maxTurns, 21, "content carried over");
+	});
+});
+
+test("saveConfig: fresh install writes orchestrator.jsonc", () => {
+	withConfigFiles({}, () => {
+		const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+		saveConfig({ ...loadConfig(), maxTurns: 9 });
+		assert.equal(fs.existsSync(path.join(dir, "orchestrator.jsonc")), true);
+		assert.equal(fs.existsSync(path.join(dir, "orchestrator.json")), false);
+		assert.equal(loadConfig().maxTurns, 9);
+	});
+});
+
+test("saveConfig: unknown extra keys in the user's file are preserved", () => {
+	withConfigFiles({ "orchestrator.jsonc": '{ "myOwnNote": "keep me", "maxTurns": 20 }' }, () => {
+		const config = loadConfig();
+		config.enabled = false;
+		saveConfig(config);
+		const raw = fs.readFileSync(path.join(process.env.PI_ORCH_TEST_AGENT_DIR!, "orchestrator.jsonc"), "utf-8");
+		assert.match(raw, /keep me/, "user's extra key must survive");
+		assert.equal(loadConfig().maxTurns, 20);
+		assert.equal(loadConfig().enabled, false);
 	});
 });
 

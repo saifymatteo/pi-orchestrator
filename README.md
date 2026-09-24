@@ -49,13 +49,15 @@ pi -e <path-to-your-clone>/pi-orchestrator/index.ts
 
 Child success is state-based (the RPC `agent_settled` event); child exit codes are informational only, since settled children are SIGTERMed by design.
 
-`delegate` takes three dispatch shapes: `{agent, task}` for a single job, `tasks[]` (max 8, concurrency 4) for independent parallel work, and `chain[]` with a `{previous}` placeholder for dependent steps — plus two discovery shapes: `{action: "list"}` returns the live fleet (names, sources, tools, descriptions) and `{action: "sessions"}` lists the current session's persistent subagent transcripts, both without spawning anything.
+`delegate` dispatch is **async by default** (ADR-0014): `{agent, task}` and `tasks[]` (max 8, concurrency 4) return an acceptance with run ids immediately, and each subagent's settled result is pushed into the conversation when it finishes (auto-resuming the orchestrator when idle, queued behind an active turn otherwise) — the orchestrator never polls and stays free to talk with you or dispatch more work mid-flight. Pass `async: false` to block until the final result (quick lookups); `chain[]` with a `{previous}` placeholder is always blocking because each step needs the prior result in-process. Control/discovery shapes: `{action: "status"}` lists live runs, `{action: "cancel", runId}` kills one run, `{action: "list"}` returns the live fleet, and `{action: "sessions"}` lists persistent subagent transcripts — all without spawning anything. Lifecycle: ESC and session shutdown kill the whole fleet; a crashed parent's children self-terminate within ~5s (heartbeat).
 
 Agent names are discoverable before the first call: every `agent` field in the tool schema carries a JSON-Schema `enum` of the fleet discovered at extension load (fallback: free-form when the fleet is empty), so models pick from real names instead of inventing plausible ones. The `list` action and the `Unknown agent: ... Available agents: ...` error always reflect the fleet as of right now, including agents added mid-session.
 
-## Config — `~/.pi/agent/orchestrator.json`
+## Config — `~/.pi/agent/orchestrator.jsonc`
 
-```json
+The config is JSONC (ADR-0015): write `//` or `/* */` comments next to any key and they survive every save — the extension edits only the keys it changes, through `jsonc-parser`'s comment-preserving modify API. A legacy `orchestrator.json` is still read; the first save writes `orchestrator.jsonc` and removes the old file.
+
+```jsonc
 {
   "enabled": true,
   "keepTools": ["delegate"],
@@ -86,7 +88,7 @@ Matchers for tools the orchestrator keeps while engaged. Matcher semantics (all 
 
 **Empty vs non-empty `keepTools` (derived rule, ADR-0004):** an **empty** `keepTools` list auto-keeps every discovered non-builtin extension — each contributes an `ext:<id>` matcher to the effective keep-list each turn, so its tools stay available without config entries; extensions that re-register a builtin tool name still only contribute their non-colliding tools, kept by exact name (see below). A **non-empty** `keepTools` list is an exact allowlist — only the matching tools stay, plus `delegate`. The default `"keepTools": ["delegate"]` is therefore keep-list-only.
 
-By default the effective keep-list is exactly your config matchers plus `delegate` — keep-list-only. Non-builtin packages are still discovered at runtime and shown in `/orchestrator-tools` (read-only), but their tools are NOT available to the orchestrator unless a matcher above names them or `keepTools` is empty (ADR-0004). Discovery covers non-builtin packages only — pi's core tools stay excluded unless a matcher names them. The derived information is never persisted; only your config matchers are written back to `orchestrator.json`. Existing config entries with old `ext:` ids remain valid — they simply match nothing while that package is absent, and match again if it returns.
+By default the effective keep-list is exactly your config matchers plus `delegate` — keep-list-only. Non-builtin packages are still discovered at runtime and shown in `/orchestrator-tools` (read-only), but their tools are NOT available to the orchestrator unless a matcher above names them or `keepTools` is empty (ADR-0004). Discovery covers non-builtin packages only — pi's core tools stay excluded unless a matcher names them. The derived information is never persisted; only your config matchers are written back to `orchestrator.jsonc`. Existing config entries with old `ext:` ids remain valid — they simply match nothing while that package is absent, and match again if it returns.
 
 **Builtin-shadowing exclusions:** extensions that re-register a builtin tool name (`read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`) are excluded from discovery unless explicitly listed as `ext:<id>` in keepTools. Registration replaces the builtin wholesale, so keeping the shadow would silently resurrect a core tool the config never listed; an explicit `ext:<id>` entry re-enables the whole extension.
 
@@ -209,7 +211,7 @@ Child processes inherit installed extensions automatically through pi's own exte
 
 ## Commands
 
-- `/orchestrator` — toggle orchestration (persisted to orchestrator.json; startup notifies when disengaged)
+- `/orchestrator` — toggle orchestration (persisted to orchestrator.jsonc; startup notifies when disengaged)
 - `/orchestrator-tools` — checkbox UI over the keep-list (TUI only); discovered `ext:` matchers are shown read-only; long tool lists truncate to terminal width (capped at 6 names + `+N more`)
 
 ## Policy and fleet text
@@ -219,7 +221,7 @@ The delegation policy text is computed once per engagement episode from what is 
 ## Files
 
 - `index.ts` — entry: child watchdog, engagement, reduction, gate, commands
-- `config.ts` — orchestrator.json, keep-list matchers, runtime tool discovery
+- `config.ts` — orchestrator.jsonc (JSONC, comment-preserving writes), keep-list matchers, runtime tool discovery
 - `width.ts` — visible-width helpers (ANSI-aware truncation for TUI rendering)
 - `agents.ts` — fleet discovery (builtin, user, project tree)
 - `policy.ts` — delegation policy text generated from fleet + kept tools

@@ -99,6 +99,11 @@ export function fleetKey(runId: number, mode: "single" | "parallel" | "chain", i
 	return mode === "parallel" ? `task${runId}:${index}` : `chain${runId}:${index}`;
 }
 
+/** Current live-task snapshot (fleet widget data source; tests + status UI). */
+export function fleetTasksSnapshot(): RunningTask[] {
+	return Array.from(runningTasks.values());
+}
+
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -179,6 +184,19 @@ export function idleFleetWidgetLines(agentNames: string[], orchestratorMode: Orc
 
 const liveProcs = new Set<ChildProcess>();
 
+/**
+ * The watcher of the registered extension instance (undefined in print mode
+ * and tests). Session teardown marks runs aborted BEFORE killing so their
+ * settle paths skip result delivery — no sendMessage during teardown.
+ */
+let activeWatcher: ReturnType<typeof createRunWatcher> | undefined;
+
+/** Mark every live run aborted (delivery suppressed) and kill the fleet.
+ *  Idempotent; overlaps with killAllFleet are safe. */
+export function abortActiveRuns(): void {
+	activeWatcher?.abortAll();
+}
+
 /** Kill every live subagent process. Called on session_shutdown and abort. */
 export function killAllFleet(): void {
 	for (const proc of liveProcs) {
@@ -201,6 +219,181 @@ export function killAllFleet(): void {
 }
 
 const NL = String.fromCharCode(10);
+
+// ── Run watcher (ADR-0014): async child lifecycle outlives the tool call ────
+
+/** A settled async run pushed into the parent conversation. */
+export interface RunDelivery {
+	runId: number;
+	agent: string;
+	task: string;
+	mode: "single" | "parallel";
+	result: SingleResult;
+	/** True when the orchestrator cancelled this run ({action: "cancel"}). */
+	cancelled: boolean;
+}
+
+export interface RunWatcherDeps {
+	/** Push a settled run into the parent conversation (pi.sendMessage). */
+	deliver(delivery: RunDelivery): void;
+	/** Fired when the last live run settles (fleet idle again). */
+	onIdle(): void;
+	/** Injectable clock (tests). */
+	now(): number;
+}
+
+export interface AcceptedRun {
+	runId: number;
+	agent: string;
+	task: string;
+	mode: "single" | "parallel";
+}
+
+export interface RunWatcherEntry {
+	runId: number;
+	agent: string;
+	task: string;
+	mode: "single" | "parallel";
+	elapsedMs: number;
+}
+
+export interface RunWatcherStartInput {
+	runId: number;
+	agent: string;
+	task: string;
+	mode: "single" | "parallel";
+	/** runningTasks key (fleetKey) — the watcher owns this entry's lifecycle:
+	 *  a placeholder is visible to the widget before the child's first event
+	 *  and is removed on settle (idempotently — runSingleAgent also deletes it
+	 *  on close). */
+	widgetKey: string;
+	/** Starts the child. registerKill receives the child kill handle (SIGTERM
+	 *  + SIGKILL escalation) the moment the process exists; for a run already
+	 *  cancelled or aborted at that point, the watcher kills immediately —
+	 *  a cancel racing a slow spawn cannot orphan the child. */
+	start(opts: { registerKill(kill: () => void): void }): Promise<SingleResult>;
+}
+
+export interface RunWatcher {
+	start(input: RunWatcherStartInput): AcceptedRun;
+	/** Live runs for the status action, oldest first. */
+	entries(): Array<AcceptedRun & { elapsedMs: number }>;
+	/** Kill one live run. Its settle still delivers (marked cancelled) so the
+	 *  orchestrator learns the run ended and what it produced until then. */
+	cancel(runId: number): { ok: true } | { ok: false; error: string };
+	/** ESC semantics: kill everything live and deliver NOTHING when runs
+	 *  settle — an aborted conversation must not be resumed by a delivery. */
+	abortAll(): void;
+}
+
+export function createRunWatcher(deps: RunWatcherDeps): RunWatcher {
+	interface LiveEntry {
+		runId: number;
+		agent: string;
+		task: string;
+		mode: "single" | "parallel";
+		widgetKey: string;
+		startedAt: number;
+		/** Kill handle, set by the runner once the child process exists. */
+		kill?: () => void;
+		cancelled: boolean;
+		aborted: boolean;
+	}
+
+	const live = new Map<number, LiveEntry>();
+
+	const safeKill = (entry: LiveEntry) => {
+		try {
+			entry.kill?.();
+		} catch {
+			/* already gone */
+		}
+	};
+
+	/** Remove the run from both registries; onIdle when the fleet is empty. */
+	const settle = (entry: LiveEntry) => {
+		if (!live.has(entry.runId)) return; // idempotent (kill + natural settle race)
+		live.delete(entry.runId);
+		runningTasks.delete(entry.widgetKey);
+		if (live.size === 0 && runningTasks.size === 0) deps.onIdle();
+	};
+
+	return {
+		start(input: RunWatcherStartInput): AcceptedRun {
+			const entry: LiveEntry = {
+				runId: input.runId,
+				agent: input.agent,
+				task: input.task,
+				mode: input.mode,
+				widgetKey: input.widgetKey,
+				startedAt: deps.now(),
+				kill: undefined,
+				cancelled: false,
+				aborted: false,
+			};
+			live.set(entry.runId, entry);
+			// Widget placeholder: the run is visible (turn 0) before the spawn's
+			// first event overwrites the same key; hasRunningTasks() stays true
+			// across the dispatch→spawn gap, so idle never fires spuriously.
+			runningTasks.set(entry.widgetKey, {
+				id: entry.widgetKey,
+				agent: entry.agent,
+				task: entry.task,
+				mode: entry.mode,
+				turns: 0,
+				toolTurns: 0,
+				contextTokens: 0,
+				inputTokens: 0,
+				outputTokens: 0,
+			});
+			input.start({ registerKill }).then(
+				(result) => {
+					const wasAborted = entry.aborted;
+					const wasCancelled = entry.cancelled;
+					settle(entry);
+					if (wasAborted) return; // aborted conversation: no delivery
+					deps.deliver({ runId: entry.runId, mode: entry.mode, agent: entry.agent, task: entry.task, result, cancelled: wasCancelled });
+				},
+				() => settle(entry), // rejected run (aborted child): settle silently
+			);
+
+			/** Late kill registration: if cancel/abort already happened, kill now. */
+			function registerKill(kill: () => void): void {
+				if (entry.kill) return;
+				entry.kill = kill;
+				if (entry.cancelled || entry.aborted) safeKill(entry);
+			}
+
+			return { runId: entry.runId, agent: entry.agent, task: entry.task, mode: entry.mode };
+		},
+
+		entries() {
+			return Array.from(live.values())
+				.sort((a, b) => a.runId - b.runId)
+				.map((e) => ({ runId: e.runId, agent: e.agent, task: e.task, mode: e.mode, elapsedMs: Math.max(0, deps.now() - e.startedAt) }));
+		},
+
+		cancel(runId: number): { ok: true } | { ok: false; error: string } {
+			const entry = live.get(runId);
+			if (!entry) {
+				return {
+					ok: false,
+					error: `No live run with id ${runId}. Use {action: "status"} to list live runs; finished runs cannot be cancelled.`,
+				};
+			}
+			entry.cancelled = true;
+			safeKill(entry);
+			return { ok: true };
+		},
+
+		abortAll() {
+			for (const entry of live.values()) {
+				entry.aborted = true;
+				safeKill(entry);
+			}
+		},
+	};
+}
 
 /** One RPC response line from a child (rpc.md): `{ id, type: "response",
  *  success, data?, error? }`. Loose by design — pi owns the payload shape. */
@@ -453,8 +646,11 @@ export interface SingleResult {
 }
 
 export interface SubagentDetails {
-	mode: "single" | "parallel" | "chain";
+	mode: "single" | "parallel" | "chain" | "accepted";
 	results: SingleResult[];
+	/** Async run bookkeeping (ADR-0014): deliveries echo the acceptance's run id. */
+	runId?: number;
+	cancelled?: boolean;
 }
 
 /**
@@ -916,36 +1112,74 @@ interface DispatchDefaults {
 	thinkingLevel?: ThinkingLevel;
 }
 
-async function runSingleAgent(
-	defaultCwd: string,
-	agentKey: string,
-	dispatchDefaults: DispatchDefaults,
-	agents: AgentConfig[],
-	agentName: string,
-	task: string,
-	maxTurns: number,
-	stallTimeoutMs: number,
-	blockedTools: string[],
-	extensions: string[],
+/**
+ * One subagent run (ADR-0014): the whole child lifecycle for a single task.
+ * Options object — the runner is injectable (DelegateDeps.runAgent) so tests
+ * can drive dispatch without spawning real pi processes.
+ */
+export interface RunSingleAgentOptions {
+	defaultCwd: string;
+	/** runningTasks key (fleetKey) for the fleet widget. */
+	agentKey: string;
+	dispatchDefaults: DispatchDefaults;
+	agents: AgentConfig[];
+	agentName: string;
+	task: string;
+	maxTurns: number;
+	stallTimeoutMs: number;
+	blockedTools: string[];
+	extensions: string[];
 	/** Parent's pre-policy system prompt to append (config
 	 *  `forwardParentPrompt`); undefined disables the append. */
-	parentPrompt: string | undefined,
+	parentPrompt: string | undefined;
 	/** Parent-side tool list for expanding blockedTools to concrete names at
 	 *  spawn time (tools may register after registration — resolved fresh per
 	 *  spawn). */
-	getAllTools: () => Array<{ name: string; sourceInfo?: unknown }>,
-	cwd: string | undefined,
-	step: number | undefined,
-	signal: AbortSignal | undefined,
-	onUpdate: OnUpdateCallback | undefined,
-	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	getAllTools: () => Array<{ name: string; sourceInfo?: unknown }>;
+	cwd: string | undefined;
+	step: number | undefined;
+	/** Blocking-path abort signal (the tool call's). Async runs pass undefined —
+	 *  their lifecycle is owned by the run watcher via registerKill. */
+	signal: AbortSignal | undefined;
+	onUpdate: OnUpdateCallback | undefined;
+	makeDetails: (results: SingleResult[]) => SubagentDetails;
 	/** Dispatch mode for the fleet widget line (single/parallel/chain). */
-	fleetMode: RunningTask["mode"],
-	onFleetChange: () => void,
+	fleetMode: RunningTask["mode"];
+	onFleetChange: () => void;
 	/** Sub-session policy (ADR-0011): whether the child keeps a persistent pi
 	 *  session and which parent session file to link it to. */
-	sessionOpts: { persist: boolean; parentSessionFile?: string | undefined },
-): Promise<SingleResult> {
+	sessionOpts: { persist: boolean; parentSessionFile?: string | undefined };
+	/** Called with the child kill handle (SIGTERM + SIGKILL escalation) the
+	 *  moment the process exists — the run watcher's cancel/abort path. */
+	registerKill?: (kill: () => void) => void;
+}
+
+export type RunAgent = (options: RunSingleAgentOptions) => Promise<SingleResult>;
+
+async function runSingleAgent(opts: RunSingleAgentOptions): Promise<SingleResult> {
+	const {
+		defaultCwd,
+		agentKey,
+		dispatchDefaults,
+		agents,
+		agentName,
+		task,
+		maxTurns,
+		stallTimeoutMs,
+		blockedTools,
+		extensions,
+		parentPrompt,
+		getAllTools,
+		cwd,
+		step,
+		signal,
+		onUpdate,
+		makeDetails,
+		fleetMode,
+		onFleetChange,
+		sessionOpts,
+		registerKill,
+	} = opts;
 	const agent = agents.find((a) => a.name === agentName);
 
 	if (!agent) {
@@ -1128,6 +1362,9 @@ async function runSingleAgent(
 				}, 5000);
 				t.unref();
 			};
+			// Run-watcher hook (ADR-0014): the watcher's cancel/abort path kills
+			// through this handle; a cancel racing a slow spawn is caught here.
+			registerKill?.(killChild);
 
 			// Interval body references killChild, so the timer starts inside
 			// the executor. Cleared by stopStallWatchdog() on every terminal
@@ -1437,9 +1674,16 @@ export function buildDelegateParams(fleetNames: string[]) {
 	return Type.Object({
 		action: Type.Optional(
 			Type.String({
-				enum: ["list", "sessions"],
+				enum: ["list", "sessions", "status", "cancel"],
 				description:
-					"Discovery actions: pass exactly {action: 'list'} with no other params to get the current fleet (names, sources, tools, descriptions), or {action: 'sessions'} to list this session's persistent subagent sub-sessions. Use these when unsure which agents exist or which prior runs are on record.",
+					"Discovery/control actions: {action: 'list'} returns the current fleet; {action: 'sessions'} lists this session's persistent subagent sub-sessions; {action: 'status'} lists live runs; {action: 'cancel', runId} kills one run. Use these instead of polling.",
+			}),
+		),
+		runId: Type.Optional(Type.Number({ description: "Run id (required for the cancel action)" })),
+		async: Type.Optional(
+			Type.Boolean({
+				description:
+					"Async dispatch (default true): the call returns an acceptance immediately and the settled result is delivered into the conversation automatically. Pass false to block until the final result (quick lookups). Chain mode is always blocking.",
 			}),
 		),
 		agent: Type.Optional(agentNameParam("Agent name (single mode)", fleetNames)),
@@ -1468,14 +1712,58 @@ export function buildDelegateParams(fleetNames: string[]) {
 	});
 }
 
-// ── Registration ────────────────────────────────────────────────────────────
+// ── Registration ──────────────────────────────────────────────────────────
+
+/** Custom-message type for async run deliveries (ADR-0014). */
+const RUN_RESULT_MESSAGE_TYPE = "orchestrator-run-result";
+
+/**
+ * Append the touched-files line (derived from the run's own messages) to
+ * returned/delivered text — \n\n-joined, omitted entirely when nothing touched.
+ */
+function withTouchedFiles(text: string, messages: Message[]): string {
+	const files = formatTouchedFiles(collectTouchedFiles(messages));
+	return files ? `${text}\n\n${files}` : text;
+}
+
+/** Human/model-facing elapsed formatting for the status action. */
+function formatElapsed(ms: number): string {
+	const s = Math.floor(ms / 1000);
+	if (s < 60) return `${s}s`;
+	const m = Math.floor(s / 60);
+	if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
+	const h = Math.floor(m / 60);
+	return `${h}h${String(m % 60).padStart(2, "0")}m`;
+}
+
+/** Status line for one delivered run (async result push, ADR-0014). */
+function deliveryText(delivery: RunDelivery): string {
+	const r = delivery.result;
+	const failed = isFailedResult(r);
+	const header = delivery.cancelled
+		? `✗ Run ${delivery.runId} — ${delivery.agent} — cancelled`
+		: failed
+			? `✗ Run ${delivery.runId} — ${delivery.agent} — failed${r.stopReason ? ` (${r.stopReason})` : ""}`
+			: `✓ Run ${delivery.runId} — ${delivery.agent} — completed`;
+	const body = delivery.cancelled
+		? `Cancelled by orchestrator.\n\n${getResultOutput(r)}`
+		: failed
+			? `Agent ${r.stopReason || "failed"}: ${getResultOutput(r)}`
+			: getFinalOutput(r.messages) || "(no output)";
+	return `${header}\n\n${withTouchedFiles(withSessionNote(r, body), r.messages)}`;
+}
 
 export interface DelegateDeps {
 	getAgents: () => AgentConfig[];
 	getDispatchDefaults: (ctx: any) => DispatchDefaults;
 	getCwd: () => string;
 	getSignal: () => AbortSignal | undefined;
+	/** Async result deliveries auto-resume the orchestrator when idle (ADR-0014).
+	 *  Required - without it a settled run's push is silently dropped. */
 	onIdle: () => void;
+	/** The child runner. Defaults to the real runSingleAgent; tests inject a
+	 *  fake here to drive dispatch without spawning pi processes. */
+	runAgent?: RunAgent;
 	/** Current orchestrator state for the fleet widget label (ADR-0003):
 	 *  `engaged` while the gate forces delegation, `auto` when it does not.
 	 *  Required — a defaulted label would put the widget back to guessing, and
@@ -1532,14 +1820,75 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 	// It reflects the fleet at registration time; the `list` action below is
 	// the always-fresh truth.
 	const fleetNames = deps.getAgents().map((a) => a.name);
+	const runAgentCall: RunAgent = deps.runAgent ?? runSingleAgent;
+
+	// Run watcher (ADR-0014): owns async run lifecycle outliving tool calls.
+	// Settled results are pushed into the conversation (auto-resume when idle,
+	// followUp queue when mid-turn) — the orchestrator never polls.
+	const watcher = createRunWatcher({
+		deliver: (delivery) => {
+			try {
+				pi.sendMessage?.(
+					{
+						customType: RUN_RESULT_MESSAGE_TYPE,
+						content: [{ type: "text", text: deliveryText(delivery) }],
+						display: true,
+						details: {
+							mode: "single",
+							results: [delivery.result],
+							runId: delivery.runId,
+							cancelled: delivery.cancelled,
+						} satisfies SubagentDetails,
+					},
+					{ triggerTurn: true, deliverAs: "followUp" },
+				);
+			} catch {
+				/* delivery surface unavailable — the ADR-0011 sub-session transcript survives */
+			}
+		},
+		onIdle: () => deps.onIdle(),
+		now: () => Date.now(),
+	});
+
+	activeWatcher = watcher;
+
+	// Transcript rendering for delivered run results: a compact push view —
+	// status icon, run id, agent, task, first output line; expands to the
+	// full delivered text (same content the model sees).
+	pi.registerMessageRenderer?.(RUN_RESULT_MESSAGE_TYPE, (message: any, options: any, theme: any) => {
+		const details = message?.details as SubagentDetails | undefined;
+		const r = details?.results?.[0];
+		const fullText = Array.isArray(message?.content) && message.content[0]?.type === "text" ? message.content[0].text : "(run result)";
+		if (!r) return new Text(fullText, 0, 0);
+		const icon = taskStatus(r, false) === "failed" ? "✗" : "✓";
+		const head = `${icon} Run ${details.runId ?? "?"} — ${r.agent}`;
+		if (options?.expanded === true) return new Text(`${theme.fg("toolTitle", theme.bold(head))}\n${fullText}`, 0, 0);
+		const bodyLines = fullText.split("\n").map((l: string) => l.trim()).filter(Boolean);
+		const first = bodyLines.find((l: string) => !l.startsWith("✓") && !l.startsWith("✗")) ?? "";
+		return new Text(`${theme.fg("toolTitle", theme.bold(head))} ${theme.fg("muted", r.task)}\n${theme.fg("muted", first.slice(0, 160))}`, 0, 0);
+	});
+
+	// ESC kill for async children (ADR-0014): pi exposes no abort event, but an
+	// aborted turn's final assistant message carries stopReason "aborted". ESC
+	// while the orchestrator streams therefore kills the whole fleet (blocking
+	// children via their tool-call signal, async children via the watcher);
+	// ESC while fully idle is a pi-level no-op and cannot be observed.
+	pi.on?.("agent_end", (event: any) => {
+		const messages: any[] = event?.messages ?? [];
+		const last = messages[messages.length - 1];
+		if (last?.role === "assistant" && last?.stopReason === "aborted") watcher.abortAll();
+	});
+
 	pi.registerTool({
 		name: "delegate",
 		label: "Delegate",
 		description:
 			"Delegate work to a fleet subagent with an isolated context and full tools. " +
+			"Dispatch is ASYNC BY DEFAULT: the call returns an acceptance (run id) immediately and each settled result is delivered into this conversation automatically — never poll. " +
 			"Modes: single ({agent, task}), parallel ({tasks: [{agent, task}]}, max 8), " +
-			"chain ({chain: [{agent, task}]}, sequential, {previous} placeholder inserts the prior step's output), " +
-			"discovery ({action: 'list'} returns the current fleet; {action: 'sessions'} lists this session's persistent subagent sub-sessions). " +
+			"chain ({chain: [{agent, task}]}, sequential and blocking, {previous} placeholder inserts the prior step's output), " +
+			"blocking escape hatch ({async: false} waits for the final result — quick lookups), " +
+			"discovery/control ({action: 'list'} fleet; {action: 'sessions'} sub-sessions; {action: 'status'} live runs; {action: 'cancel', runId} kill one). " +
 			"Agent names must be exact fleet names — never invent one; when unsure, list first. " +
 			"Each dispatch returns a Subagent session path — the subagent's persistent pi transcript — that you can pass to another subagent for a deeper look. " +
 			"This is your only way to read, write, edit, search, or run commands.",
@@ -1597,6 +1946,63 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 					details: { mode: "single", results: [] },
 				};
 			}
+			// ── Async run control (ADR-0014) ─────────────────────────────
+			// status: list live runs (id, agent, task, elapsed) — how the
+			// orchestrator re-finds in-flight work after compaction or a long
+			// conversation. cancel: surgical single-run kill.
+			if (params?.action === "status") {
+				const entries = watcher.entries();
+				const listing =
+					entries
+						.map(
+							(e) =>
+								`- run ${e.runId} · ${e.agent} · "${truncateWithEllipsis(e.task.replace(/\s+/g, " "), MAX_TASK_SUMMARY_CHARS)}" · ${formatElapsed(e.elapsedMs)}`,
+						)
+						.join("\n") || "";
+				return {
+					content: [
+						{
+							type: "text",
+							text: entries.length
+								? `Live runs (${entries.length}):\n${listing}\n\nResults are delivered automatically as runs settle — no polling. {action: "cancel", runId} stops one; {action: "sessions"} lists finished transcripts.`
+								: "(no live runs — dispatch with {agent, task}; results are delivered automatically as runs settle. {action: \"sessions\"} lists finished subagent transcripts.)",
+						},
+					],
+					details: { mode: "single", results: [] },
+				};
+			}
+			if (params?.action === "cancel") {
+				if (typeof params.runId !== "number" || !Number.isInteger(params.runId)) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: 'Cancel requires the run id: {action: "cancel", runId: <number>}. Use {action: "status"} to list live runs.',
+							},
+						],
+						details: { mode: "single", results: [] },
+						isError: true,
+					};
+				}
+				const out = watcher.cancel(params.runId);
+				if (!out.ok) {
+					return {
+						content: [{ type: "text", text: `Cancel failed: ${out.error}` }],
+						details: { mode: "single", results: [] },
+						isError: true,
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Run ${params.runId} cancelled: kill signal sent. Its final state is delivered automatically when the child exits.`,
+						},
+					],
+					details: { mode: "single", results: [] },
+				};
+			}
+
 			const dispatchDefaults = deps.getDispatchDefaults(ctx);
 			const defaultMaxTurns = deps.getMaxTurns?.() ?? DEFAULT_MAX_TURNS;
 			const stallTimeoutMs = deps.getStallTimeoutMs?.() ?? DEFAULT_STALL_TIMEOUT_MS;
@@ -1625,13 +2031,75 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 			const fleetChanged = () => updateFleetWidget(ctx, agents.map((a) => a.name), deps.getOrchestratorMode());
 			// Unique per invocation: concurrent delegate calls must not collide on
 			// runningTasks keys, or the fleet header undercounts running agents.
-			const runId = nextFleetRunId();
-			// Append the touched-files line (derived from the run's own messages)
-			// to returned text — \n\n-joined, omitted entirely when nothing touched.
-			const withTouchedFiles = (text: string, messages: Message[]): string => {
-				const files = formatTouchedFiles(collectTouchedFiles(messages));
-				return files ? `${text}\n\n${files}` : text;
+			// Async dispatches assign per-task ids inside startAsyncRun instead.
+
+			// ── Async dispatch (ADR-0014) ────────────────────────────────
+			// One accepted run per task; the watcher owns the lifecycle outliving
+			// this tool call and pushes the settled result into the conversation.
+			const startAsyncRun = (
+				agentName: string,
+				taskText: string,
+				mode: "single" | "parallel",
+				index: number | undefined,
+				taskCwd: string | undefined,
+			): AcceptedRun => {
+				const asyncRunId = nextFleetRunId();
+				return watcher.start({
+					runId: asyncRunId,
+					agent: agentName,
+					task: taskText,
+					mode,
+					widgetKey: fleetKey(asyncRunId, mode, index),
+					start: ({ registerKill }) =>
+						runAgentCall({
+							defaultCwd: deps.getCwd(),
+							agentKey: fleetKey(asyncRunId, mode, index),
+							dispatchDefaults,
+							agents,
+							agentName,
+							task: taskText,
+							maxTurns: resolveMaxTurns(agentName),
+							stallTimeoutMs,
+							blockedTools: resolveBlockedTools(agentName),
+							extensions,
+							parentPrompt,
+							getAllTools: () => pi.getAllTools(),
+							cwd: taskCwd,
+							step: undefined,
+							// No tool-call signal: the run outlives this call; the
+							// watcher's kill handle owns the child (ADR-0014).
+							signal: undefined,
+							onUpdate: undefined,
+							makeDetails: makeDetails(mode),
+							fleetMode: mode,
+							onFleetChange: fleetChanged,
+							// Sub-session policy (ADR-0011)
+							sessionOpts: { persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
+							registerKill,
+						}),
+				});
 			};
+
+			// Acceptance result: run ids + the no-poll instruction. Results
+			// arrive as pushed messages — the orchestrator must not wait.
+			const acceptedResult = (runs: AcceptedRun[]) => ({
+				content: [
+					{
+						type: "text",
+						text:
+							`Accepted ${runs.length === 1 ? `run ${runs[0].runId} — ${runs[0].agent}` : `${runs.length} runs`}:\n` +
+							runs.map((r) => `- run ${r.runId} — ${r.agent}: "${truncateWithEllipsis(r.task.replace(/\s+/g, " "), MAX_TASK_SUMMARY_CHARS)}"`).join("\n") +
+							"\n\nResults are delivered automatically as each subagent settles — do not poll and do not keep this turn alive waiting. Dispatch more work, respond to the user, or end your turn. " +
+							'{action: "status"} lists live runs; {action: "cancel", runId} stops one; {action: "sessions"} lists finished transcripts.',
+					},
+				],
+				details: { mode: "accepted", results: [] } satisfies SubagentDetails,
+			});
+
+			// Unknown-agent validation for the async path: a synchronous error at
+			// dispatch — never an acceptance, so the orchestrator never waits for
+			// a result that cannot come (ADR-0014 failure split).
+			const unknownAsyncAgents = (names: string[]): string[] => [...new Set(names)].filter((n) => !agents.some((a) => a.name === n));
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -1653,6 +2121,19 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 
 			try {
 				if (params.chain && params.chain.length > 0) {
+					if (params.async === true) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: 'Chain dispatch is always blocking: {previous} substitution needs each prior result in-process. Drop async (or pass async: false) and the chain runs to completion in this call.',
+								},
+							],
+							details: makeDetails("chain")([]),
+							isError: true,
+						};
+					}
+					const runId = nextFleetRunId();
 					const results: SingleResult[] = [];
 					let previousOutput = "";
 
@@ -1673,29 +2154,29 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 								}
 							: undefined;
 
-						const result = await runSingleAgent(
-							deps.getCwd(),
-							fleetKey(runId, "chain", i),
+						const result = await runAgentCall({
+							defaultCwd: deps.getCwd(),
+							agentKey: fleetKey(runId, "chain", i),
 							dispatchDefaults,
 							agents,
-							step.agent,
-							taskWithContext,
-							resolveMaxTurns(step.agent),
+							agentName: step.agent,
+							task: taskWithContext,
+							maxTurns: resolveMaxTurns(step.agent),
 							stallTimeoutMs,
-							resolveBlockedTools(step.agent),
+							blockedTools: resolveBlockedTools(step.agent),
 							extensions,
 							parentPrompt,
-							() => pi.getAllTools(),
-							step.cwd,
-							i + 1,
-							signal ?? deps.getSignal(),
-							chainUpdate,
-							makeDetails("chain"),
-							"chain",
-							fleetChanged,
+							getAllTools: () => pi.getAllTools(),
+							cwd: step.cwd,
+							step: i + 1,
+							signal: signal ?? deps.getSignal(),
+							onUpdate: chainUpdate,
+							makeDetails: makeDetails("chain"),
+							fleetMode: "chain",
+							onFleetChange: fleetChanged,
 							// Sub-session policy (ADR-0011)
-							{ persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
-						);
+							sessionOpts: { persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
+						});
 						results.push(result);
 
 						if (isFailedResult(result)) {
@@ -1727,6 +2208,22 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						};
 					}
 
+					if (params.async !== false) {
+						const unknown = unknownAsyncAgents((params.tasks as { agent: string }[]).map((t) => t.agent));
+						if (unknown.length > 0) {
+							const available = agents.map((a) => a.name).join(", ") || "none";
+							return {
+								content: [{ type: "text", text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${available}` }],
+								details: makeDetails("parallel")([]),
+								isError: true,
+							};
+						}
+						return acceptedResult(
+							(params.tasks as { agent: string; task: string; cwd?: string }[]).map((t, index) => startAsyncRun(t.agent, t.task, "parallel", index, t.cwd)),
+						);
+					}
+
+					const runId = nextFleetRunId();
 					const allResults: SingleResult[] = new Array(params.tasks.length);
 					for (let i = 0; i < params.tasks.length; i++) {
 						allResults[i] = {
@@ -1754,34 +2251,34 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						params.tasks as { agent: string; task: string; cwd?: string }[],
 						MAX_CONCURRENCY,
 						async (t, index) => {
-							const result = await runSingleAgent(
-								deps.getCwd(),
-								fleetKey(runId, "parallel", index),
+							const result = await runAgentCall({
+								defaultCwd: deps.getCwd(),
+								agentKey: fleetKey(runId, "parallel", index),
 								dispatchDefaults,
 								agents,
-								t.agent,
-								t.task,
-								resolveMaxTurns(t.agent),
+								agentName: t.agent,
+								task: t.task,
+								maxTurns: resolveMaxTurns(t.agent),
 								stallTimeoutMs,
-								resolveBlockedTools(t.agent),
+								blockedTools: resolveBlockedTools(t.agent),
 								extensions,
 								parentPrompt,
-								() => pi.getAllTools(),
-								t.cwd,
-								undefined,
-								signal ?? deps.getSignal(),
-								(partial) => {
+								getAllTools: () => pi.getAllTools(),
+								cwd: t.cwd,
+								step: undefined,
+								signal: signal ?? deps.getSignal(),
+								onUpdate: (partial) => {
 									if (partial.details?.results[0]) {
 										allResults[index] = partial.details.results[0];
 										emitParallelUpdate();
 									}
 								},
-								makeDetails("parallel"),
-								"parallel",
-								fleetChanged,
+								makeDetails: makeDetails("parallel"),
+								fleetMode: "parallel",
+								onFleetChange: fleetChanged,
 								// Sub-session policy (ADR-0011)
-								{ persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
-							);
+								sessionOpts: { persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
+							});
 							allResults[index] = result;
 							emitParallelUpdate();
 							return result;
@@ -1805,29 +2302,43 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 				}
 
 				if (params.agent && params.task) {
-					const result = await runSingleAgent(
-						deps.getCwd(),
-						fleetKey(runId, "single"),
+					if (params.async !== false) {
+						const unknown = unknownAsyncAgents([params.agent]);
+						if (unknown.length > 0) {
+							const available = agents.map((a) => a.name).join(", ") || "none";
+							return {
+								content: [{ type: "text", text: `Unknown agent "${params.agent}". Available: ${available}` }],
+								details: makeDetails("single")([]),
+								isError: true,
+							};
+						}
+						return acceptedResult([startAsyncRun(params.agent, params.task, "single", undefined, params.cwd)]);
+					}
+
+					const runId = nextFleetRunId();
+					const result = await runAgentCall({
+						defaultCwd: deps.getCwd(),
+						agentKey: fleetKey(runId, "single"),
 						dispatchDefaults,
 						agents,
-						params.agent,
-						params.task,
-						resolveMaxTurns(params.agent),
+						agentName: params.agent,
+						task: params.task,
+						maxTurns: resolveMaxTurns(params.agent),
 						stallTimeoutMs,
-						resolveBlockedTools(params.agent),
+						blockedTools: resolveBlockedTools(params.agent),
 						extensions,
 						parentPrompt,
-						() => pi.getAllTools(),
-						params.cwd,
-						undefined,
-						signal ?? deps.getSignal(),
+						getAllTools: () => pi.getAllTools(),
+						cwd: params.cwd,
+						step: undefined,
+						signal: signal ?? deps.getSignal(),
 						onUpdate,
-						makeDetails("single"),
-						"single",
-						fleetChanged,
+						makeDetails: makeDetails("single"),
+						fleetMode: "single",
+						onFleetChange: fleetChanged,
 						// Sub-session policy (ADR-0011)
-						{ persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
-					);
+						sessionOpts: { persist: deps.getChildSessions?.() ?? true, parentSessionFile: deps.getParentSessionFile?.(ctx) },
+					});
 					if (isFailedResult(result)) {
 						return {
 							content: [

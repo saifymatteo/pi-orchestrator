@@ -568,9 +568,9 @@ test("buildDelegateParams: empty fleet omits the enum (free-form, no empty-enum 
 	}
 });
 
-test("buildDelegateParams: discovery action is enum-constrained to list/sessions", () => {
+test("buildDelegateParams: action is enum-constrained to list/sessions/status/cancel", () => {
 	const params = buildDelegateParams(FLEET);
-	assert.deepEqual((params.properties.action as any).enum, ["list", "sessions"]);
+	assert.deepEqual((params.properties.action as any).enum, ["list", "sessions", "status", "cancel"]);
 });
 
 test("agentNameParam: description carries the valid names so models without enum support still see them", () => {
@@ -929,4 +929,260 @@ test("parallelProgress: a settled failure is done, not running", () => {
 
 test("parallelProgress: finished run reports no running tasks", () => {
 	assert.equal(parallelProgress([settledOk("a"), settledOk("b")]), "Parallel: 2/2 done, 0 running...");
+});
+
+// ── Async dispatch (ADR-0014): acceptance-first, delivery, cancel/status ────
+// The runner is injected (deps.runAgent) so tests drive dispatch without
+// spawning real pi processes. registerKill mirrors runSingleAgent's contract:
+// the runner registers its kill handle as soon as the child exists.
+
+type RecordedCall = {
+	agent: string;
+	task: string;
+	maxTurns: number;
+	killCount: number;
+};
+
+type DispatchHarness = {
+	calls: RecordedCall[];
+	sendCalls: Array<{ msg: any; opts: any }>;
+	renderers: Array<{ type: string; fn: any }>;
+	idleCalls(): number;
+	execute(params: any): Promise<any>;
+	resolveRun(overrides?: Partial<SingleResult>): void;
+	drain(): Promise<void>;
+};
+
+function dispatchHarness(agents: any[] | null = null): DispatchHarness {
+	let captured: any;
+	const fleet =
+		agents ??
+		[
+			{
+				name: "scout",
+				description: "Fast read-only recon",
+				tools: ["read", "grep"],
+				source: "builtin",
+				systemPrompt: "Scout prompt",
+				filePath: "builtin:scout",
+			},
+			{
+				name: "worker",
+				description: "General implementation agent",
+				source: "project",
+				systemPrompt: "Worker prompt",
+				filePath: "project:worker",
+			},
+		];
+	const calls: RecordedCall[] = [];
+	const sendCalls: any[] = [];
+	const renderers: Array<{ type: string; fn: any }> = [];
+	let idle = 0;
+	const pending = new Map<number, (result: SingleResult) => void>();
+	let nextRunKey = 1;
+	const runAgent = (call: any) => {
+		const record: RecordedCall = { agent: call.agentName, task: call.task, maxTurns: call.maxTurns, killCount: 0 };
+		call.registerKill?.(() => record.killCount++);
+		calls.push(record);
+		const key = nextRunKey++;
+		return new Promise<SingleResult>((resolve) => {
+			pending.set(key, resolve);
+		});
+	};
+	registerDelegateTool(
+		{
+			registerTool: (t: any) => (captured = t),
+			sendMessage: (msg: any, opts: any) => sendCalls.push({ msg, opts }),
+			registerMessageRenderer: (type: string, fn: any) => renderers.push({ type, fn }),
+			on: () => {},
+		} as any,
+		{
+			getAgents: () => fleet,
+			getDispatchDefaults: () => ({}),
+			getCwd: () => process.cwd(),
+			getSignal: () => undefined,
+			onIdle: () => idle++,
+			getOrchestratorMode: () => "engaged",
+			runAgent,
+		} as any,
+	);
+	const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+	return {
+		calls,
+		sendCalls,
+		renderers,
+		idleCalls: () => idle,
+		async execute(params: any) {
+			return await captured.execute("call-1", params, undefined, undefined, {});
+		},
+		/** Resolve the oldest unsettled run (dispatch order). */
+		resolveRun(overrides: Partial<SingleResult> = {}) {
+			const key = pending.keys().next().value as number;
+			const resolve = pending.get(key)!;
+			pending.delete(key);
+			resolve({
+				agent: "scout",
+				agentSource: "builtin",
+				task: "recon auth",
+				exitCode: 0,
+				completedNormally: true,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "recon done" }] }] as Message[],
+				stderr: "",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1, toolTurns: 1 },
+				...overrides,
+			} as SingleResult);
+		},
+		drain,
+	};
+}
+
+const flushD = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("async default: single dispatch returns an acceptance immediately (runner not awaited)", async () => {
+	const h = dispatchHarness();
+	const out = await h.execute({ agent: "scout", task: "recon auth" });
+	assert.match(out.content[0].text, /Accepted/i);
+	assert.match(out.content[0].text, /run \d+/i);
+	assert.match(out.content[0].text, /scout/);
+	assert.equal(out.details.mode, "accepted");
+	assert.equal(h.calls.length, 1, "runner started exactly once");
+	assert.equal(h.calls[0].agent, "scout");
+	assert.equal(h.sendCalls.length, 0, "nothing delivered before settle");
+	assert.equal(h.idleCalls(), 0, "fleet is live — no idle");
+
+	// Settle → delivery arrives; the acceptance already returned.
+	h.resolveRun();
+	await flushD();
+	assert.equal(h.sendCalls.length, 1, "settled result is pushed into the conversation");
+	assert.equal(h.idleCalls(), 1, "last run settled → idle");
+});
+
+test("async delivery: sendMessage carries a custom run-result message with display + details, triggerTurn on", async () => {
+	const h = dispatchHarness();
+	await h.execute({ agent: "scout", task: "recon auth" });
+	h.resolveRun({ stopReason: "end" });
+	await flushD();
+	const { msg, opts } = h.sendCalls[0];
+	assert.match(msg.customType, /run-result|orchestrator/i);
+	assert.equal(msg.display, true);
+	assert.equal(msg.details.mode, "single");
+	assert.equal(msg.details.results.length, 1);
+	assert.ok(msg.content[0].text.includes("recon done"), "output reaches the model");
+	assert.equal(opts.triggerTurn, true);
+	assert.equal(opts.deliverAs, "followUp");
+});
+
+test("a message renderer is registered for the run-result message type", async () => {
+	const h = dispatchHarness();
+	assert.equal(h.renderers.length, 1);
+	assert.match(h.renderers[0].type, /run-result|orchestrator/i);
+	// The renderer works on a delivered message's details (smoke).
+	const component: any = h.renderers[0].fn(
+		{ customType: h.renderers[0].type, content: [{ type: "text", text: "x" }], display: true, details: { mode: "single", results: [singleResult({ completedNormally: true, exitCode: 0 })] } },
+		{ expanded: false },
+		passthroughTheme,
+	);
+	assert.ok(component, "renderer returns a component");
+});
+
+test("async:false is the blocking escape hatch (final result, no push delivery)", async () => {
+	const h = dispatchHarness();
+	const outPromise = h.execute({ agent: "scout", task: "recon auth", async: false });
+	assert.equal(h.calls.length, 1);
+	h.resolveRun();
+	const out = await outPromise;
+	assert.match(out.content[0].text, /recon done/);
+	assert.equal(out.details.mode, "single");
+	assert.equal(out.details.results.length, 1);
+	assert.equal(h.sendCalls.length, 0, "blocking mode returns in the tool result, never pushes");
+});
+
+test("chain + async:true is a validation error naming chain as always-blocking", async () => {
+	const h = dispatchHarness();
+	const out = await h.execute({ chain: [{ agent: "scout", task: "a" }], async: true });
+	assert.match(out.content[0].text, /chain/i);
+	assert.match(out.content[0].text, /blocking/i);
+	assert.equal(h.calls.length, 0, "no dispatch happened");
+});
+
+test("chain without async stays blocking (unchanged default for chains)", async () => {
+	const h = dispatchHarness();
+	const outPromise = h.execute({ chain: [{ agent: "scout", task: "step one" }, { agent: "worker", task: "then {previous}" }] });
+	h.resolveRun(); // step one settles
+	await flushD();
+	h.resolveRun(); // step two settles
+	const out = await outPromise;
+	assert.equal(h.calls.length, 2, "both steps ran in-process");
+	assert.equal(out.details.mode, "chain");
+	assert.equal(out.details.results.length, 2);
+	assert.equal(h.sendCalls.length, 0);
+});
+
+test("async parallel: acceptance lists every task with its own run id; each settle delivers", async () => {
+	const h = dispatchHarness();
+	const out = await h.execute({ tasks: [{ agent: "scout", task: "a" }, { agent: "worker", task: "b" }] });
+	assert.match(out.content[0].text, /Accepted/i);
+	const ids = [...out.content[0].text.matchAll(/run (\d+)/gi)].map((m) => m[1]);
+	assert.equal(ids.length, 2, "two run ids in the acceptance");
+	assert.equal(new Set(ids).size, 2, "run ids are unique per task");
+	assert.equal(h.calls.length, 2);
+	h.resolveRun();
+	h.resolveRun();
+	await flushD();
+	assert.equal(h.sendCalls.length, 2, "one delivery per task");
+});
+
+test("async parallel over the max still errors synchronously", async () => {
+	const h = dispatchHarness();
+	const tasks = Array.from({ length: 9 }, (_, i) => ({ agent: "scout", task: `t${i}` }));
+	const out = await h.execute({ tasks });
+	assert.match(out.content[0].text, /Max is 8/);
+	assert.equal(h.calls.length, 0);
+});
+
+test("async dispatch with an unknown agent is a synchronous validation error (never an acceptance)", async () => {
+	const h = dispatchHarness();
+	const out = await h.execute({ agent: "ghost", task: "boo" });
+	assert.match(out.content[0].text, /Unknown agent/i);
+	assert.equal(out.isError, true);
+	assert.equal(h.calls.length, 0, "no dispatch happened");
+	assert.equal(h.sendCalls.length, 0);
+});
+
+test("status action lists live runs (id, agent, task, elapsed); empty after settle", async () => {
+	const h = dispatchHarness();
+	await h.execute({ agent: "scout", task: "recon auth" });
+	const live = await h.execute({ action: "status" });
+	assert.match(live.content[0].text, /run \d+/);
+	assert.match(live.content[0].text, /scout/);
+	assert.match(live.content[0].text, /recon auth/);
+
+	h.resolveRun();
+	await flushD();
+	const empty = await h.execute({ action: "status" });
+	assert.match(empty.content[0].text, /no live runs/i);
+});
+
+test("cancel action: kills one live run; settle delivers cancelled=true", async () => {
+	const h = dispatchHarness();
+	const accepted = await h.execute({ agent: "scout", task: "recon auth" });
+	const runId = Number(/run (\d+)/i.exec(accepted.content[0].text)![1]);
+
+	const out = await h.execute({ action: "cancel", runId });
+	assert.equal(out.ok !== false, true);
+	assert.match(out.content[0].text, /cancel/i);
+	assert.equal(h.calls[0].killCount, 1, "the child received the kill");
+
+	h.resolveRun({ completedNormally: false, exitCode: 1 });
+	await flushD();
+	assert.equal(h.sendCalls.length, 1, "cancelled run still delivers its final state");
+	assert.match(h.sendCalls[0].msg.content[0].text, /cancel/i);
+});
+
+test("cancel with unknown run id errors informatively; missing runId errors informatively", async () => {
+	const h = dispatchHarness();
+	const unknown = await h.execute({ action: "cancel", runId: 424242 });
+	assert.match(unknown.content[0].text, /no live run/i);
+	const missing = await h.execute({ action: "cancel" });
+	assert.match(missing.content[0].text, /runId/i);
 });

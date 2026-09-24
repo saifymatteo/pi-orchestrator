@@ -1,5 +1,5 @@
 /**
- * Orchestrator configuration (~/.pi/agent/orchestrator.json)
+ * Orchestrator configuration (~/.pi/agent/orchestrator.jsonc)
  *
  * keepTools matcher syntax:
  *   - exact tool name            "todo"
@@ -22,7 +22,9 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import * as jsonc from "jsonc-parser";
 
 export interface OrchestratorConfig {
 	/** Orchestration engaged by default (persistent toggle via /orchestrator). */
@@ -75,14 +77,45 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
 	childSessions: true,
 };
 
+const CONFIG_FILENAME = "orchestrator.jsonc";
+const LEGACY_CONFIG_FILENAME = "orchestrator.json";
+
 export function getConfigPath(): string {
-	return path.join(getAgentDir(), "orchestrator.json");
+	return path.join(getAgentDir(), CONFIG_FILENAME);
+}
+
+function getLegacyConfigPath(): string {
+	return path.join(getAgentDir(), LEGACY_CONFIG_FILENAME);
+}
+
+/**
+ * Read the config file's raw text (ADR-0015): prefers `orchestrator.jsonc`,
+ * falls back to the legacy `orchestrator.json` (plain JSON is valid JSONC —
+ * nothing breaks). Returns null when neither exists.
+ */
+function readConfigText(): string | null {
+	try {
+		return fs.readFileSync(getConfigPath(), "utf-8");
+	} catch {
+		/* fall through to legacy */
+	}
+	try {
+		return fs.readFileSync(getLegacyConfigPath(), "utf-8");
+	} catch {
+		return null;
+	}
 }
 
 export function loadConfig(): OrchestratorConfig {
-	const file = getConfigPath();
 	try {
-		const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Partial<OrchestratorConfig>;
+		const text = readConfigText();
+		if (text === null) throw new Error("no config file");
+		// JSONC parse (comments + trailing commas are valid; plain JSON too).
+		// jsonc-parser reports problems instead of throwing — treat any parse
+		// error like today's JSON.parse throw: fall back to defaults.
+		const errors: jsonc.ParseError[] = [];
+		const raw = jsonc.parse(text, errors, { allowTrailingComma: true }) as Partial<OrchestratorConfig>;
+		if (errors.length > 0 || !raw || typeof raw !== "object") throw new Error("invalid config");
 		return {
 			enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_CONFIG.enabled,
 			keepTools: Array.isArray(raw.keepTools)
@@ -136,8 +169,36 @@ function parseStallTimeoutMs(value: unknown): number | undefined {
 }
 
 export function saveConfig(config: OrchestratorConfig): void {
-	fs.mkdirSync(path.dirname(getConfigPath()), { recursive: true });
-	fs.writeFileSync(getConfigPath(), `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+	const preferred = getConfigPath();
+	const legacy = getLegacyConfigPath();
+	fs.mkdirSync(path.dirname(preferred), { recursive: true });
+
+	// Comment-preserving write (ADR-0015): per-property edits applied to the
+	// existing file's text — comments and unknown keys elsewhere in the file
+	// survive. Without an existing file (fresh install, or a file so malformed
+	// there is nothing to edit) the config is written as formatted JSON.
+	const sourceText = readConfigText();
+	let text: string;
+	if (sourceText !== null && sourceText.trim() !== "") {
+		const formatting: jsonc.FormattingOptions = { tabSize: 2, insertSpaces: true };
+		// Sequential per-property edits: each modify() is computed against the
+		// text as updated by the previous one. New properties all insert near
+		// EOF, so batch-computing every edit against the original text would
+		// overlap. Keys whose value did not change are skipped entirely —
+		// rewriting them would drop comments INSIDE their values (e.g. keepTools).
+		const current = jsonc.parse(sourceText, [], { allowTrailingComma: true }) as Record<string, unknown>;
+		text = sourceText;
+		for (const [key, value] of Object.entries(config)) {
+			if (isDeepStrictEqual(current?.[key], value)) continue;
+			text = jsonc.applyEdits(text, jsonc.modify(text, [key], value, { formattingOptions: formatting }));
+		}
+	} else {
+		text = `${JSON.stringify(config, null, 2)}\n`;
+	}
+	fs.writeFileSync(preferred, text.endsWith("\n") ? text : `${text}\n`, "utf-8");
+	// One-time migration: remove the legacy file only AFTER the .jsonc was
+	// written successfully, so a failed write never loses the user's config.
+	if (fs.existsSync(legacy)) fs.rmSync(legacy);
 }
 
 /**
@@ -310,7 +371,7 @@ export function discoverKeptTools(
  *     config entry keeps the whole extension, partial or not.
  * DEFAULT_CONFIG.keepTools is ["delegate"] (non-empty), so the out-of-the-box
  * behavior is keep-list-only. Derived per turn — never persisted; only
- * `config.keepTools` is written back to orchestrator.json.
+ * `config.keepTools` is written back to orchestrator.jsonc.
  */
 export function effectiveKeepTools(configKeepTools: string[], discovered: DiscoveredTool[]): string[] {
 	const matchers = new Set<string>();
