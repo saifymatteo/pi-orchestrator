@@ -1670,7 +1670,7 @@ export function agentNameParam(description: string, fleetNames: string[]) {
  * `enum` on every agent-name field lists the agents discovered at extension
  * load (builtin + user + project for the session cwd).
  */
-export function buildDelegateParams(fleetNames: string[]) {
+export function buildDelegateParams(fleetNames: string[], asyncDefault: boolean = true) {
 	return Type.Object({
 		action: Type.Optional(
 			Type.String({
@@ -1682,8 +1682,9 @@ export function buildDelegateParams(fleetNames: string[]) {
 		runId: Type.Optional(Type.Number({ description: "Run id (required for the cancel action)" })),
 		async: Type.Optional(
 			Type.Boolean({
-				description:
-					"Async dispatch (default true): the call returns an acceptance immediately and the settled result is delivered into the conversation automatically. Pass false to block until the final result (quick lookups). Chain mode is always blocking.",
+				description: asyncDefault
+					? "Async dispatch (default true): the call returns an acceptance immediately and the settled result is delivered into the conversation automatically. Pass false to block until the final result (quick lookups). Chain mode is always blocking."
+					: "Async dispatch (default false — dispatches block until the final result, which the tool call returns directly). Pass true to fire-and-forget: the call returns an acceptance immediately and the settled result is delivered into the conversation automatically. Chain mode is always blocking.",
 			}),
 		),
 		agent: Type.Optional(agentNameParam("Agent name (single mode)", fleetNames)),
@@ -1789,9 +1790,15 @@ export interface DelegateDeps {
 	/** The parent's pre-policy system prompt, captured per turn by the
 	 *  before_agent_start hook. Undefined until captured (or in child mode). */
 	getParentPrompt?: () => string | undefined;
-	/** Persistent sub-sessions (orchestrator.json `childSessions`, ADR-0011).
+	/** Persistent sub-sessions (orchestrator.jsonc `childSessions`, ADR-0011).
 	 *  Falls back to true (sessions on). */
 	getChildSessions?: () => boolean;
+	/** Default dispatch mode (orchestrator.jsonc `async`, ADR-0016). true
+	 *  (default): a dispatch without an explicit `async` parameter returns an
+	 *  acceptance immediately; false: it blocks until the final result. The
+	 *  per-call `async` parameter always overrides this; chains are always
+	 *  blocking regardless. */
+	getAsyncDefault?: () => boolean;
 	/** The parent's own session file (ctx.sessionManager.getSessionFile()) —
 	 *  recorded in each child's header via RPC `new_session {parentSession}`
 	 *  and used to place child sessions in the parent's session dir.
@@ -1820,6 +1827,10 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 	// It reflects the fleet at registration time; the `list` action below is
 	// the always-fresh truth.
 	const fleetNames = deps.getAgents().map((a) => a.name);
+	// Schema/description-level default (ADR-0016): snapshot at registration.
+	// The execute path re-reads deps.getAsyncDefault() per call so a config
+	// change mid-session takes effect without re-registration.
+	const asyncDefault = deps.getAsyncDefault?.() ?? true;
 	const runAgentCall: RunAgent = deps.runAgent ?? runSingleAgent;
 
 	// Run watcher (ADR-0014): owns async run lifecycle outliving tool calls.
@@ -1884,18 +1895,25 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 		label: "Delegate",
 		description:
 			"Delegate work to a fleet subagent with an isolated context and full tools. " +
-			"Dispatch is ASYNC BY DEFAULT: the call returns an acceptance (run id) immediately and each settled result is delivered into this conversation automatically — never poll. " +
+			(asyncDefault
+				? "Dispatch is ASYNC BY DEFAULT: the call returns an acceptance (run id) immediately and each settled result is delivered into this conversation automatically — never poll. "
+				: "Dispatch is BLOCKING BY DEFAULT (orchestrator.jsonc async: false): the call waits for the subagent's final result. Pass {async: true} to fire-and-forget — the acceptance returns immediately and each settled result is delivered into this conversation automatically. ") +
 			"Modes: single ({agent, task}), parallel ({tasks: [{agent, task}]}, max 8), " +
 			"chain ({chain: [{agent, task}]}, sequential and blocking, {previous} placeholder inserts the prior step's output), " +
-			"blocking escape hatch ({async: false} waits for the final result — quick lookups), " +
+			(asyncDefault
+				? "blocking escape hatch ({async: false} waits for the final result — quick lookups), "
+				: "fire-and-forget escape hatch ({async: true} returns an acceptance immediately), ") +
 			"discovery/control ({action: 'list'} fleet; {action: 'sessions'} sub-sessions; {action: 'status'} live runs; {action: 'cancel', runId} kill one). " +
 			"Agent names must be exact fleet names — never invent one; when unsure, list first. " +
 			"Each dispatch returns a Subagent session path — the subagent's persistent pi transcript — that you can pass to another subagent for a deeper look. " +
 			"This is your only way to read, write, edit, search, or run commands.",
-		parameters: buildDelegateParams(fleetNames),
+		parameters: buildDelegateParams(fleetNames, asyncDefault),
 
 		async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {
 			const agents = deps.getAgents();
+			// Live per-call default (ADR-0016): config change mid-session applies
+			// without re-registration; an explicit `async` parameter always wins.
+			const asyncDefault = deps.getAsyncDefault?.() ?? true;
 
 			// Discovery action (zero-cost): report the live fleet — recomputed per
 			// call, so it reflects agents added after registration (the schema
@@ -2208,7 +2226,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						};
 					}
 
-					if (params.async !== false) {
+					if (params.async ?? asyncDefault) {
 						const unknown = unknownAsyncAgents((params.tasks as { agent: string }[]).map((t) => t.agent));
 						if (unknown.length > 0) {
 							const available = agents.map((a) => a.name).join(", ") || "none";
@@ -2302,7 +2320,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 				}
 
 				if (params.agent && params.task) {
-					if (params.async !== false) {
+					if (params.async ?? asyncDefault) {
 						const unknown = unknownAsyncAgents([params.agent]);
 						if (unknown.length > 0) {
 							const available = agents.map((a) => a.name).join(", ") || "none";

@@ -84,6 +84,14 @@ test("buildDelegateDeps: getChildBlockedTools reads the live config (session_sta
 	assert.deepEqual(deps.getChildBlockedTools?.(), ["ext:@luxusai/pi-hindsight"]);
 });
 
+test("buildDelegateDeps: getAsyncDefault reads the live config async key (ADR-0016)", () => {
+	let config: OrchestratorConfig = { ...DEFAULT_CONFIG, async: true };
+	const deps = buildDelegateDeps(() => config, () => {});
+	assert.equal(deps.getAsyncDefault?.(), true);
+	config = { ...config, async: false };
+	assert.equal(deps.getAsyncDefault?.(), false);
+});
+
 test("buildDelegateDeps: other config-backed deps also read the live config", () => {
 	let config: OrchestratorConfig = { ...DEFAULT_CONFIG, maxTurns: 10 };
 	const deps = buildDelegateDeps(() => config, () => {});

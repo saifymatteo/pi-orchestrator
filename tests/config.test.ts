@@ -82,6 +82,7 @@ test("loadConfig: missing file yields full defaults", () => {
 			maxTurns: 50,
 			stallTimeoutMs: 600000,
 			childSessions: true,
+			async: true,
 		});
 	});
 });
@@ -184,6 +185,18 @@ test("loadConfig: orchestrator.jsonc parses with comments and trailing commas (A
 		assert.equal(config.maxTurns, 30);
 		assert.deepEqual(config.keepTools, ["delegate", "todo"]);
 		assert.deepEqual(config.childBlockedTools, ["bash"]);
+	});
+});
+
+test("loadConfig: async default is true when absent, honored when false (ADR-0016)", () => {
+	withConfigFiles({ "orchestrator.jsonc": JSON.stringify({ enabled: true }) }, () => {
+		assert.equal(loadConfig().async, true, "absent async falls back to the default");
+	});
+	withConfigFiles({ "orchestrator.jsonc": JSON.stringify({ async: false }) }, () => {
+		assert.equal(loadConfig().async, false, "explicit async: false is honored");
+	});
+	withConfigFiles({ "orchestrator.jsonc": JSON.stringify({ async: "no" }) }, () => {
+		assert.equal(loadConfig().async, true, "non-boolean async falls back to the default");
 	});
 });
 

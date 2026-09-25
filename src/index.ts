@@ -292,6 +292,9 @@ export function buildDelegateDeps(getConfig: () => OrchestratorConfig, onIdle: (
 		// sub-sessions of a session live together and delegate({action:
 		// "sessions"}) can list them. Undefined when the parent runs ephemeral.
 		getChildSessions: () => getConfig().childSessions,
+		// Default dispatch mode (orchestrator.jsonc `async`, ADR-0016):
+		// true = fire-and-forget acceptance, false = block for the final result.
+		getAsyncDefault: () => getConfig().async,
 		// Widget label source of truth: index keeps `config.enabled` in sync with
 		// its `engaged` flag (setEngaged writes both, session_start reloads).
 		getOrchestratorMode: () => (getConfig().enabled ? "engaged" : "auto"),

@@ -62,6 +62,13 @@ export interface OrchestratorConfig {
 	 *  (`delegate({action: "sessions"})` lists them). false restores
 	 *  ephemeral children (--no-session). */
 	childSessions: boolean;
+	/** Default dispatch mode for the delegate tool (ADR-0016). true (default):
+	 *  a dispatch without an explicit `async` parameter returns an acceptance
+	 *  immediately and the settled result is delivered into the conversation
+	 *  later. false: dispatches block until the final result. The per-call
+	 *  `async` parameter always overrides this default; chains are always
+	 *  blocking regardless. */
+	async: boolean;
 }
 
 export const DEFAULT_CONFIG: OrchestratorConfig = {
@@ -75,6 +82,7 @@ export const DEFAULT_CONFIG: OrchestratorConfig = {
 	maxTurns: 50,
 	stallTimeoutMs: 600_000,
 	childSessions: true,
+	async: true,
 };
 
 const CONFIG_FILENAME = "orchestrator.jsonc";
@@ -141,6 +149,7 @@ export function loadConfig(): OrchestratorConfig {
 			maxTurns: parseMaxTurns(raw.maxTurns) ?? DEFAULT_CONFIG.maxTurns,
 			childSessions:
 				typeof raw.childSessions === "boolean" ? raw.childSessions : DEFAULT_CONFIG.childSessions,
+			async: typeof raw.async === "boolean" ? raw.async : DEFAULT_CONFIG.async,
 			stallTimeoutMs: parseStallTimeoutMs(raw.stallTimeoutMs) ?? DEFAULT_CONFIG.stallTimeoutMs,
 		};
 	} catch {

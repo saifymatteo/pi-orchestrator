@@ -65,6 +65,7 @@ The config is JSONC (ADR-0015): write `//` or `/* */` comments next to any key a
   "childExtensions": [],
   "forwardParentPrompt": true,
   "childSessions": true,
+  "async": true,
   "builtinFleet": true,
   "modelOverrides": {},
   "maxTurns": 50,
@@ -130,6 +131,10 @@ Persistent sub-sessions (ADR-0011). When `true`, every subagent keeps a persiste
 - Sessions are **file-per-run**: two concurrent runs of the same agent never share a JSONL. The deterministic per-(agent, model) session id is only used for ephemeral runs (it stabilizes the OpenAI-compat `prompt_cache_key`; persistent runs get a fresh id per file). Sessions are created lazily by pi — a child killed before its first message leaves no file.
 
 Set to `false` to restore ephemeral children (`--no-session`). Note that a child spawned with a per-task `cwd` override still writes into the parent's session dir (the link is by parent session, not by cwd), and pi's `/resume` picker for the project will list named `orch: ...` sessions alongside human sessions.
+
+### `async` (boolean, default `true`)
+
+Default dispatch mode for the delegate tool (ADR-0016). With the default `true`, a dispatch returns an acceptance (run id) immediately and each settled result is delivered into the conversation automatically — the orchestrator never blocks on a subagent. Set to `false` to make dispatches **block until the final result**: the tool call returns the subagent's output directly, which suits short, sequential fleets or environments where fire-and-forget delivery is unwanted. Per call, the `async` parameter always overrides this default (`{async: true}` fires and forgets even under a blocking default, and vice versa); chain mode is always blocking regardless. The delegate tool description and the delegation policy text are generated from this value, so the model's instructions always match the configured behavior.
 
 ### `builtinFleet` (boolean, default `true`)
 

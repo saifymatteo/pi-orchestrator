@@ -953,7 +953,7 @@ type DispatchHarness = {
 	drain(): Promise<void>;
 };
 
-function dispatchHarness(agents: any[] | null = null): DispatchHarness {
+function dispatchHarness(agents: any[] | null = null, depsOverride: Record<string, unknown> = {}): DispatchHarness {
 	let captured: any;
 	const fleet =
 		agents ??
@@ -1004,6 +1004,7 @@ function dispatchHarness(agents: any[] | null = null): DispatchHarness {
 			onIdle: () => idle++,
 			getOrchestratorMode: () => "engaged",
 			runAgent,
+			...depsOverride,
 		} as any,
 	);
 	const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -1095,6 +1096,33 @@ test("async:false is the blocking escape hatch (final result, no push delivery)"
 	assert.equal(out.details.mode, "single");
 	assert.equal(out.details.results.length, 1);
 	assert.equal(h.sendCalls.length, 0, "blocking mode returns in the tool result, never pushes");
+});
+
+test("config async:false makes blocking the default; async:true overrides (ADR-0016)", async () => {
+	const h = dispatchHarness(null, { getAsyncDefault: () => false });
+	const outPromise = h.execute({ agent: "scout", task: "recon auth" });
+	assert.equal(h.calls.length, 1, "dispatch started immediately under the blocking default");
+	h.resolveRun();
+	const out = await outPromise;
+	assert.match(out.content[0].text, /recon done/, "tool call holds the final result");
+	assert.equal(out.details.mode, "single");
+	assert.equal(h.sendCalls.length, 0, "no push delivery for a blocking run");
+
+	// The per-call parameter overrides the config default.
+	const h2 = dispatchHarness(null, { getAsyncDefault: () => false });
+	const accepted = await h2.execute({ agent: "scout", task: "recon auth", async: true });
+	assert.match(accepted.content[0].text, /Accepted/i, "async: true fires and forgets despite the config");
+	assert.equal(h2.calls.length, 1);
+	h2.resolveRun();
+	await flushD();
+	assert.equal(h2.sendCalls.length, 1, "settled result pushed for the fire-and-forget run");
+});
+
+test("buildDelegateParams: async description reflects the configured default (ADR-0016)", () => {
+	const asyncSchema = (buildDelegateParams(["scout"], true).properties as any).async;
+	const blockingSchema = (buildDelegateParams(["scout"], false).properties as any).async;
+	assert.match(asyncSchema.description, /default true/);
+	assert.match(blockingSchema.description, /default false/);
 });
 
 test("chain + async:true is a validation error naming chain as always-blocking", async () => {
