@@ -386,3 +386,131 @@ test("buildPolicy: deterministic for identical inputs (ADR-0013 cache premise)",
 	const kept: DiscoveredTool[] = [{ extensionId: "ext:x", names: ["read"], partial: false }];
 	assert.equal(buildPolicy(agents, DEFAULT_CONFIG, kept), buildPolicy(agents, DEFAULT_CONFIG, kept));
 });
+
+// ── AUTO toolset hands-off (clarified contract) ─────────────────────────────
+//
+// AUTO (enabled:false) NEVER touches the active tool set. Which built-in
+// tools are active is pi's concern (its `defaultTools` setting — default
+// read/bash/edit/write; powershell/grep/find/ls stay registered-but-inactive
+// unless the user opts in), and extension tools belong to the extensions
+// that registered them (plannotator phase-gates its two tools). An earlier
+// fix force-enabled all registered builtins in AUTO; the user rejected that
+// (powershell was never opted into), so the contract is: hands-off in AUTO,
+// and the toggle-off restore (applyReduction's disengaged branch, reached
+// only via /orchestrator) must also not force-enable optional builtins.
+
+const ALL_REGISTERED = [
+	"read", "bash", "powershell", "edit", "write", "grep", "find", "ls",
+	"delegate", "advisor", "recall", "codegraph_explore", "fetch", "search", "transcribe",
+	"plannotator_submit_plan", "plannotator_mark_done",
+];
+
+/** pi's launch-time active set with the defaultTools default. */
+const LAUNCH_DEFAULT_ACTIVE = ALL_REGISTERED.filter(
+	(n) => !["grep", "find", "ls", "powershell"].includes(n),
+);
+
+function toolsetPi() {
+	const calls: string[][] = [];
+	const handlers: Record<string, Array<(event: any, ctx: any) => any>> = {};
+	const ALL = ALL_REGISTERED.map((n) => ({ name: n, sourceInfo: { path: `<builtin:${n}>` } }));
+	let active: string[] = [...LAUNCH_DEFAULT_ACTIVE];
+	const stub: any = {
+		on(event: string, handler: (event: any, ctx: any) => any) {
+			(handlers[event] ??= []).push(handler);
+		},
+		getAllTools: () => ALL.map((t) => ({ ...t })),
+		getActiveTools: () => [...active],
+		setActiveTools(names: string[]) {
+			calls.push([...names]);
+			active = [...names];
+		},
+		registerTool() {},
+		registerCommand(name: string, def: any) {
+			((handlers as any).command ??= {})[name] = def.handler;
+		},
+	};
+	return { stub, handlers, calls };
+}
+
+/** Point getAgentDir() (stubbed) at a temp dir with the given enabled flag;
+ *  restore the env afterwards so other tests are unaffected. */
+async function withAgentDir(enabled: boolean, fn: () => Promise<void>): Promise<void> {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-orch-auto-norm-"));
+	fs.writeFileSync(path.join(dir, "orchestrator.jsonc"), JSON.stringify({ enabled }));
+	const prev = process.env.PI_ORCH_TEST_AGENT_DIR;
+	process.env.PI_ORCH_TEST_AGENT_DIR = dir;
+	delete process.env.PI_ORCHESTRATOR_CHILD;
+	try {
+		await fn();
+	} finally {
+		if (prev === undefined) delete process.env.PI_ORCH_TEST_AGENT_DIR;
+		else process.env.PI_ORCH_TEST_AGENT_DIR = prev;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+async function loadExtension(): Promise<any> {
+	const mod = await import("../src/index.ts");
+	return mod.default;
+}
+
+test("AUTO session_start leaves the active set untouched (pi's defaultTools governs)", async () => {
+	const { stub, handlers, calls } = toolsetPi();
+	assert.deepEqual(stub.getActiveTools(), LAUNCH_DEFAULT_ACTIVE, "precondition: pi launch defaults are reduced");
+	await withAgentDir(false, async () => {
+		(await loadExtension())(stub);
+		assert.equal(handlers.session_start?.length, 1);
+		await handlers.session_start[0]({}, {});
+		assert.equal(calls.length, 0, "AUTO session_start must not touch the tool set");
+		assert.deepEqual(stub.getActiveTools(), LAUNCH_DEFAULT_ACTIVE);
+	});
+});
+
+test("AUTO before_agent_start stays hands-off even when tools were stripped", async () => {
+	const { stub, handlers, calls } = toolsetPi();
+	await withAgentDir(false, async () => {
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		// Simulate plannotator's idle strip + a builtin gap from a resume replay:
+		// AUTO must not revert either — whoever stripped them owns them.
+		stub.setActiveTools(stub.getActiveTools().filter((n: string) => n !== "plannotator_submit_plan" && n !== "bash"));
+		const beforeTurn = calls.length;
+		const res = await handlers.before_agent_start[0]({ systemPrompt: "p" }, {});
+		assert.equal(res, undefined, "AUTO must not append the delegation policy");
+		assert.equal(calls.length, beforeTurn, "AUTO before_agent_start must not touch the tool set");
+		await handlers.before_agent_start[0]({ systemPrompt: "p" }, {});
+		assert.equal(calls.length, beforeTurn, "later disengaged turns stay hands-off too");
+	});
+});
+
+test("toggle-off via /orchestrator restores extensions + core builtins, not optional builtins", async () => {
+	const { stub, handlers, calls } = toolsetPi();
+	await withAgentDir(true, async () => {
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		assert.deepEqual(stub.getActiveTools(), ["delegate"], "precondition: engaged keep-list");
+		calls.length = 0;
+		// Toggle off — the same path /orchestrator uses.
+		await (handlers as any).command.orchestrator("", {});
+		assert.equal(calls.length, 1, "toggle-off restores the tool set exactly once");
+		const restored = stub.getActiveTools();
+		for (const name of ["read", "bash", "edit", "write", "delegate", "advisor", "plannotator_submit_plan"]) {
+			assert.ok(restored.includes(name), `toggle-off must restore ${name}`);
+		}
+		for (const name of ["powershell", "grep", "find", "ls"]) {
+			assert.ok(!restored.includes(name), `toggle-off must not force-enable optional builtin ${name}`);
+		}
+	});
+});
+
+test("ENGAGED session_start still reduces to the keep-list (unchanged)", async () => {
+	const { stub, handlers, calls } = toolsetPi();
+	await withAgentDir(true, async () => {
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		assert.equal(calls.length, 1);
+		// DEFAULT_CONFIG.keepTools is ["delegate"] → keep-list-only leaves delegate.
+		assert.deepEqual(stub.getActiveTools(), ["delegate"]);
+	});
+});

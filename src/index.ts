@@ -28,6 +28,7 @@ import {
 	toolMatchesAnyMatcher,
 	loadConfig,
 	saveConfig,
+	BUILTIN_TOOL_NAMES,
 	type DiscoveredTool,
 	type OrchestratorConfig,
 } from "./config.ts";
@@ -36,6 +37,15 @@ import { abortActiveRuns, clearFleetWidget, hasRunningTasks, idleFleetWidgetLine
 import { buildPolicy } from "./policy.ts";
 import { truncateToWidth } from "./width.ts";
 import type { AgentConfig } from "./agents.ts";
+
+/**
+ * pi's defaultTools default (docs/settings.md): the built-in tools active in
+ * every fresh session unless the user overrides defaultTools. Used by the
+ * toggle-off restore so disengaging never force-enables optional builtins
+ * (powershell/grep/find/ls) the user never opted into. Hardcoded because pi
+ * exposes no settings accessor to extensions.
+ */
+const CORE_DEFAULT_TOOLS: ReadonlySet<string> = new Set(["read", "bash", "edit", "write"]);
 
 // ── Child mode: orphan watchdog + ADR-0007 tool gate ───────────────────────────────
 
@@ -320,6 +330,12 @@ export default function (pi: any) {
 	let config: OrchestratorConfig = loadConfig();
 	let engaged = config.enabled;
 	let lastUi: any;
+	// AUTO (enabled:false) NEVER touches the active tool set. Which built-in
+	// tools are active is pi's concern (its `defaultTools` setting,
+	// docs/settings.md), and extension tools belong to the extensions that
+	// registered them (phase gating etc.). The only AUTO tool-set action is
+	// the toggle-off restore in applyReduction()'s disengaged branch, which
+	// undoes a previous engagement without force-enabling optional builtins.
 	// Non-builtin tools discovered at runtime (ADR-0004); refreshed on every
 	// applyReduction() so late-registered tools are picked up.
 	let discovered: DiscoveredTool[] = [];
@@ -375,9 +391,32 @@ export default function (pi: any) {
 			if (engaged) {
 				const effective = effectiveKeepTools(config.keepTools, discovered);
 				const kept = all.filter((t) => toolIsKept(t, effective)).map((t) => t.name);
+				// Disengaging later runs the branch below; keep delegate so the
+				// fleet stays dispatchable while engaged.
 				pi.setActiveTools(Array.from(new Set([...kept, "delegate"])));
 			} else {
-				pi.setActiveTools(all.map((t) => t.name));
+				// Toggle-off restore: undo the keep-list reduction without
+				// force-enabling optional builtins. pi activates only the
+				// `defaultTools` set at launch (default read/bash/edit/write —
+				// docs/settings.md); powershell/grep/find/ls stay inactive unless
+				// the user opted in, and force-enabling them here would fight
+				// pi's own recomputation at the next launch. Restore every
+				// extension tool (their extensions own their availability), keep
+				// whatever builtins are currently active, and re-add the four
+				// core builtins engagement may have removed. Hardcoded because
+				// pi exposes no settings accessor to extensions; if pi ever
+				// changes its defaultTools default, update this set.
+				const active = new Set(pi.getActiveTools().map((n: string) => n.toLowerCase()));
+				pi.setActiveTools(
+					all
+						.filter(
+							(t) =>
+								!BUILTIN_TOOL_NAMES.has(t.name.toLowerCase()) ||
+								active.has(t.name.toLowerCase()) ||
+								CORE_DEFAULT_TOOLS.has(t.name.toLowerCase()),
+						)
+						.map((t) => t.name),
+				);
 			}
 		} catch (err) {
 			// Can race during startup; re-applied on every before_agent_start.
@@ -404,7 +443,7 @@ export default function (pi: any) {
 			ctx.ui.notify(
 				next
 					? `Orchestrator ENGAGED · fleet: ${discoverAgents(config).map((a) => a.name).join(", ") || "(empty)"}`
-					: "Orchestrator: AUTO — full toolset restored, delegate still on demand (persisted to orchestrator.jsonc)",
+					: "Orchestrator: AUTO — toolset returned to pi, delegate always available (persisted to orchestrator.jsonc)",
 				next ? "info" : "warning",
 			);
 		}
@@ -419,16 +458,16 @@ export default function (pi: any) {
 		engaged = config.enabled;
 		if (ctx?.ui) lastUi = ctx.ui;
 
-		if (engaged) {
-			applyReduction();
-		}
+		// AUTO stays hands-off (see the AUTO contract note at the top of this
+		// file): pi's own defaultTools recomputation is the intended AUTO state.
+		if (engaged) applyReduction();
 		// State line in both states — `engaged` when the gate forces delegation,
 		// `auto` when it does not (ADR-0003).
 		updateIdleWidget();
 		if (!engaged && ctx?.ui?.notify) {
 			// Defuse the "why isn't it forcing?" surprise (ADR-0003)
 			ctx.ui.notify(
-				"Orchestrator: AUTO (orchestrator.jsonc enabled:false) — full toolset, delegate on demand. Run /orchestrator to engage.",
+				"Orchestrator: AUTO (enabled:false) — toolset left to pi and other extensions; delegate always available. Run /orchestrator to engage.",
 				"warning",
 			);
 		}
@@ -453,7 +492,11 @@ export default function (pi: any) {
 	// turn keeps the provider prompt-cache prefix stable.
 
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
-		if (!engaged) return;
+		if (!engaged) {
+			// AUTO: hands-off — pi's defaultTools recomputation and other
+			// extensions' phase gating own the active set in this mode.
+			return;
+		}
 		// Capture the parent's real (pre-policy) prompt each turn, before the
 		// policy append below, for forwarding to subagents (forwardParentPrompt).
 		parentSystemPrompt = event.systemPrompt;

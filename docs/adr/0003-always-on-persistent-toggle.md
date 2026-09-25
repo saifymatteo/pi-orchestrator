@@ -1,3 +1,12 @@
 # Always-on engagement with persistent toggle
 
 The extension's purpose is to force delegation without the user asking for it, so engagement defaults to on for every session. `/orchestrator` toggles it and **writes the `enabled` flag back to `~/.pi/agent/orchestrator.json`**, so a disengaged state persists across sessions — the user chose persistence over session-only override, accepting the "forgot it's off" risk. To defuse that, the extension notifies on startup when it is disengaged and shows state in the fleet widget, which is painted in **both** states with a label that never claims more than the gate actually does: `orchestrator: engaged · fleet: …` while forcing is on (allow-list and policy active), `orchestrator: auto · fleet: …` when it is not — the model keeps its full toolset and `delegate` stays available on demand, so `auto` is "orchestrating by choice", not "extension inert".
+
+## Amendment (clarified after the toolset investigation)
+
+"Full toolset" in `auto` was wrong and caused a real misdiagnosis: a launch showing fewer tools than a toggle-off was read as the extension reducing the set, when the missing builtins (`grep`, `find`, `ls`, `powershell`) were simply **inactive by pi's own `defaultTools` default** (`read`, `bash`, `edit`, `write` — docs/settings.md) and two plannotator tools were phase-gated by plannotator. The clarified contract:
+
+- **AUTO never touches the active tool set.** Built-in availability is pi's `defaultTools` concern; extension tools belong to the extensions that registered them (phase gating included). The startup AUTO notification says so instead of claiming a full toolset.
+- **Toggle-off restores without force-enabling**: disengaging re-activates every extension tool, keeps whatever builtins are currently active, and re-adds only the four core builtins (`read`, `bash`, `edit`, `write`) that engagement may have removed — never the optional builtins the user never opted into (hardcoded set; pi exposes no settings accessor to extensions).
+- The transient "29 tools" observation was an artifact of the old toggle-off branch force-enabling every registered tool; pi's launch recomputation then converges the set back to the natural state on the next restart.
+- Prompt-cache note: keeping AUTO hands-off means the tool declaration is stable from the first request; force-enabling optional builtins or fighting other extensions' phase strips would churn the declaration and invalidate the provider prefix cache.
