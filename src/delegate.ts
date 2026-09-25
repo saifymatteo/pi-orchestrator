@@ -177,7 +177,7 @@ export function clearFleetWidget(ui: { setWidget(id: string, lines: string[] | u
 export type OrchestratorMode = "engaged" | "auto";
 
 export function idleFleetWidgetLines(agentNames: string[], orchestratorMode: OrchestratorMode): string[] {
-	return [`orchestrator: ${orchestratorMode} · fleet: ${agentNames.join(", ") || "(empty)"}`];
+	return [`Orchestrator: ${orchestratorMode.toUpperCase()} · Fleet: ${agentNames.join(", ") || "(empty)"}`];
 }
 
 // ── Live child-process registry (for session_shutdown reaping) ──────────────

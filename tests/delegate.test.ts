@@ -42,25 +42,25 @@ function task(overrides: Partial<{ id: string; agent: string; task: string; mode
 
 test("idle fallback: engaged state shows the engaged line with fleet names", () => {
 	assert.deepEqual(renderFleetLines([], ["scout", "worker"], "engaged"), [
-		"orchestrator: engaged · fleet: scout, worker",
+		"Orchestrator: ENGAGED · Fleet: scout, worker",
 	]);
 });
 
 test("idle fallback: empty fleet shows (empty)", () => {
-	assert.deepEqual(renderFleetLines([], [], "engaged"), ["orchestrator: engaged · fleet: (empty)"]);
+	assert.deepEqual(renderFleetLines([], [], "engaged"), ["Orchestrator: ENGAGED · Fleet: (empty)"]);
 });
 
 test("idle fallback: disengaged shows `auto`, never `engaged` (the gate is not forcing)", () => {
 	assert.deepEqual(renderFleetLines([], ["scout", "worker"], "auto"), [
-		"orchestrator: auto · fleet: scout, worker",
+		"Orchestrator: AUTO · Fleet: scout, worker",
 	]);
-	assert.deepEqual(renderFleetLines([], [], "auto"), ["orchestrator: auto · fleet: (empty)"]);
+	assert.deepEqual(renderFleetLines([], [], "auto"), ["Orchestrator: AUTO · Fleet: (empty)"]);
 });
 
 test("state label is the only difference between the two modes (no hidden claim in auto)", () => {
 	const engaged = renderFleetLines([], ["scout"], "engaged")[0];
 	const auto = renderFleetLines([], ["scout"], "auto")[0];
-	assert.equal(auto.replace("auto", "engaged"), engaged);
+	assert.equal(auto.toLowerCase().replace("auto", "engaged"), engaged.toLowerCase());
 });
 
 test("running-task lines stay state-neutral in both modes", () => {
@@ -72,8 +72,8 @@ test("idleFleetWidgetLines matches the idle fallback of renderFleetLines (both s
 	for (const orchestratorMode of ["engaged", "auto"] as const) {
 		assert.deepEqual(idleFleetWidgetLines(["scout"], orchestratorMode), renderFleetLines([], ["scout"], orchestratorMode));
 	}
-	assert.deepEqual(idleFleetWidgetLines(["scout"], "engaged"), ["orchestrator: engaged · fleet: scout"]);
-	assert.deepEqual(idleFleetWidgetLines(["scout"], "auto"), ["orchestrator: auto · fleet: scout"]);
+	assert.deepEqual(idleFleetWidgetLines(["scout"], "engaged"), ["Orchestrator: ENGAGED · Fleet: scout"]);
+	assert.deepEqual(idleFleetWidgetLines(["scout"], "auto"), ["Orchestrator: AUTO · Fleet: scout"]);
 });
 
 test("grouped header with shared mode and running count (even for 1 task)", () => {
