@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { discoverAgents, projectAgentDirs } from "../agents.ts";
+import { discoverAgents, projectAgentDirs } from "../src/agents.ts";
 
 function tempRoot(label: string) {
 	return fs.mkdtempSync(path.join(os.tmpdir(), `pi-orch-agents-${label}-`));
@@ -38,7 +38,7 @@ function withUserDir<T>(userRoot: string, fn: () => T): T {
 	}
 }
 
-const baseConfig: import("../config.ts").OrchestratorConfig = { enabled: true, keepTools: ["delegate"], childBlockedTools: [], childExtensions: [], forwardParentPrompt: true, builtinFleet: false, modelOverrides: {}, maxTurns: 50, stallTimeoutMs: 600_000, childSessions: true };
+const baseConfig: import("../src/config.ts").OrchestratorConfig = { enabled: true, keepTools: ["delegate"], childBlockedTools: [], childExtensions: [], forwardParentPrompt: true, builtinFleet: false, modelOverrides: {}, maxTurns: 50, stallTimeoutMs: 600_000, childSessions: true };
 
 // ── projectAgentDirs ────────────────────────────────────────────────────────
 

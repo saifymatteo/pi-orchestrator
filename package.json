@@ -18,7 +18,7 @@
   ],
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./src/index.ts"
     ]
   },
   "homepage": "https://github.com/saifymatteo/pi-orchestrator#readme",

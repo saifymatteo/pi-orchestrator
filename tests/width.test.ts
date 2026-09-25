@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { truncateToWidth, visibleWidth } from "../width.ts";
+import { truncateToWidth, visibleWidth } from "../src/width.ts";
 
 test("visibleWidth: counts code points, ignoring ANSI escapes", () => {
 	assert.equal(visibleWidth("hello"), 5);

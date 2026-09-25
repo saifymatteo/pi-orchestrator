@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createRunWatcher, fleetKey, fleetTasksSnapshot, type RunDelivery, type SingleResult } from "../delegate.ts";
+import { createRunWatcher, fleetKey, fleetTasksSnapshot, type RunDelivery, type SingleResult } from "../src/delegate.ts";
 
 function makeResult(overrides: Partial<SingleResult> = {}): SingleResult {
 	return {

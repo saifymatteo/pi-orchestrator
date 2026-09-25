@@ -30,7 +30,7 @@ git clone https://github.com/saifymatteo/pi-orchestrator.git
 # ]
 
 # Or, quick test
-pi -e <path-to-your-clone>/pi-orchestrator/index.ts
+pi -e <path-to-your-clone>/pi-orchestrator/src/index.ts
 ```
 
 ## How it works
@@ -220,11 +220,11 @@ The delegation policy text is computed once per engagement episode from what is 
 
 ## Files
 
-- `index.ts` — entry: child watchdog, engagement, reduction, gate, commands
-- `config.ts` — orchestrator.jsonc (JSONC, comment-preserving writes), keep-list matchers, runtime tool discovery
-- `width.ts` — visible-width helpers (ANSI-aware truncation for TUI rendering)
-- `agents.ts` — fleet discovery (builtin, user, project tree)
-- `policy.ts` — delegation policy text generated from fleet + kept tools
-- `delegate.ts` — the delegate tool: RPC child spawning, turn budget, stall watchdog, progress streaming, renderers, reaping
+- `src/index.ts` — entry: child watchdog, engagement, reduction, gate, commands
+- `src/config.ts` — orchestrator.jsonc (JSONC, comment-preserving writes), keep-list matchers, runtime tool discovery
+- `src/width.ts` — visible-width helpers (ANSI-aware truncation for TUI rendering)
+- `src/agents.ts` — fleet discovery (builtin, user, project tree)
+- `src/policy.ts` — delegation policy text generated from fleet + kept tools
+- `src/delegate.ts` — the delegate tool: RPC child spawning, turn budget, stall watchdog, progress streaming, renderers, reaping
 - `agents/*.md` — builtin fleet definitions
 - `docs/adr/` — decision records

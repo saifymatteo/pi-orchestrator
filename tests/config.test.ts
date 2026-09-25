@@ -19,7 +19,7 @@ import {
 	saveConfig,
 	toolIsKept,
 	toolMatchesAnyMatcher,
-} from "../config.ts";
+} from "../src/config.ts";
 
 // ── loadConfig / maxTurns validation ────────────────────────────────────────
 

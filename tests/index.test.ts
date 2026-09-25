@@ -18,10 +18,10 @@ import {
 	createPolicyTextCache,
 	stripDuplicatedParentSegments,
 	withParentPrompt,
-} from "../index.ts";
-import { DEFAULT_CONFIG, type DiscoveredTool, type OrchestratorConfig } from "../config.ts";
-import { buildPolicy } from "../policy.ts";
-import type { AgentConfig } from "../agents.ts";
+} from "../src/index.ts";
+import { DEFAULT_CONFIG, type DiscoveredTool, type OrchestratorConfig } from "../src/config.ts";
+import { buildPolicy } from "../src/policy.ts";
+import type { AgentConfig } from "../src/agents.ts";
 
 test("parseBlockedToolsEnv: empty string → no matchers (gate not installed)", () => {
 	assert.deepEqual(parseBlockedToolsEnv(""), []);

@@ -13,10 +13,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
 
-import { idleFleetWidgetLines, renderFleetLines } from "../delegate.ts";
+import { idleFleetWidgetLines, renderFleetLines } from "../src/delegate.ts";
 import type { Message } from "@earendil-works/pi-ai";
-import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId, parallelProgress, runStatus, taskStatus, type SingleResult } from "../delegate.ts";
-import { buildChildSpawnArgs, expandBlockedToolsToNames, stableSessionId } from "../delegate.ts";
+import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId, parallelProgress, runStatus, taskStatus, type SingleResult } from "../src/delegate.ts";
+import { buildChildSpawnArgs, expandBlockedToolsToNames, stableSessionId } from "../src/delegate.ts";
 
 // Provider-neutral model placeholders and OS-native synthetic paths — the
 // tests must not depend on any concrete model registry or drive letters.
@@ -164,7 +164,7 @@ test("agent names longer than 12 chars are truncated, never padded", () => {
 // Captures the tool definition pi would register, then drives renderResult
 // directly with a passthrough theme (fg/bold return the text unchanged).
 
-import { registerDelegateTool } from "../delegate.ts";
+import { registerDelegateTool } from "../src/delegate.ts";
 
 const delegateTool: any = (() => {
 	let captured: any;
@@ -537,7 +537,7 @@ test("expandBlockedToolsToNames: empty matchers ⇒ []", () => {
 
 // ── Fleet enum in the tool schema (first-turn agent-name mangle fix) ────────
 
-import { agentNameParam, buildDelegateParams } from "../delegate.ts";
+import { agentNameParam, buildDelegateParams } from "../src/delegate.ts";
 
 const FLEET = ["planner", "reviewer", "scout", "worker"];
 
@@ -668,7 +668,7 @@ test("list action on an empty fleet reports an empty fleet", async () => {
 
 // ── Sub-session discovery (ADR-0011) ───────────────────────────────────────
 
-import { parseSessionHeader, readSessionHeader, scanSubSessions } from "../delegate.ts";
+import { parseSessionHeader, readSessionHeader, scanSubSessions } from "../src/delegate.ts";
 
 test("parseSessionHeader: accepts the v3 session header, rejects everything else", () => {
 	const header = parseSessionHeader(

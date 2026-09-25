@@ -16,7 +16,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createRpcWaiters } from "../delegate.ts";
+import { createRpcWaiters } from "../src/delegate.ts";
 
 const response = (id: string, extra: Record<string, unknown> = {}) => ({
 	type: "response",
