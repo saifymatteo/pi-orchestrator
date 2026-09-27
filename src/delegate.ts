@@ -1109,7 +1109,26 @@ type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 interface DispatchDefaults {
 	model?: string;
+	/** The dispatching parent's live session thinking level. Inherited only by
+	 *  model-less agents without their own explicit level (see resolveThinkingLevel). */
 	thinkingLevel?: ThinkingLevel;
+}
+
+/**
+ * Effective thinking level for one subagent dispatch. Explicit beats
+ * inherited: an agent's `thinking` (frontmatter, or a builtinFleet config
+ * entry stamped onto builtin agents at discovery) applies regardless of a
+ * pinned model. Without one, the parent's live session level is inherited
+ * only by model-less agents (dispatch-config inheritance, unchanged);
+ * otherwise pi's per-model default applies. Unsupported model/level combos
+ * pass through to pi, which errors or clamps (no orchestrator-side
+ * validation of provider capabilities).
+ */
+export function resolveThinkingLevel(
+	agent: Pick<AgentConfig, "model" | "thinking">,
+	dispatchDefaults: Pick<DispatchDefaults, "thinkingLevel">,
+): ThinkingLevel | undefined {
+	return agent.thinking ?? (agent.model ? undefined : dispatchDefaults.thinkingLevel);
 }
 
 /**
@@ -1197,7 +1216,6 @@ async function runSingleAgent(opts: RunSingleAgentOptions): Promise<SingleResult
 		};
 	}
 
-	const inheritsDispatchConfig = !agent.model;
 	const model = agent.model ?? dispatchDefaults.model;
 	// ADR-0011: persistent sub-sessions are file-per-run — a deterministic id
 	// shared across concurrent same-agent spawns would point two writers at
@@ -1207,7 +1225,7 @@ async function runSingleAgent(opts: RunSingleAgentOptions): Promise<SingleResult
 	const args = buildChildSpawnArgs({
 		model,
 		sessionId: persistSessions ? undefined : stableSessionId(agent.name, model),
-		thinkingLevel: inheritsDispatchConfig ? dispatchDefaults.thinkingLevel : undefined,
+		thinkingLevel: resolveThinkingLevel(agent, dispatchDefaults),
 		tools: agent.tools,
 		extensions,
 		// Always-on unregistration (ADR-0008): every matcher — exact, glob, ext:<id>

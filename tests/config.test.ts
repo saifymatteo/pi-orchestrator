@@ -13,9 +13,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
+	builtinThinkingOverrides,
 	discoverKeptTools,
 	effectiveKeepTools,
 	loadConfig,
+	parseThinkingLevel,
 	saveConfig,
 	toolIsKept,
 	toolMatchesAnyMatcher,
@@ -274,6 +276,118 @@ test("saveConfig: unknown extra keys in the user's file are preserved", () => {
 		assert.match(raw, /keep me/, "user's extra key must survive");
 		assert.equal(loadConfig().maxTurns, 20);
 		assert.equal(loadConfig().enabled, false);
+	});
+});
+
+// ── thinking levels (builtinFleet object form; parseThinkingLevel) ─────────
+
+/** Capture console.error for warning assertions. */
+function captureWarnings(fn: () => void): string[] {
+	const lines: string[] = [];
+	const orig = console.error;
+	console.error = (...args: unknown[]) => lines.push(args.join(" "));
+	try {
+		fn();
+	} finally {
+		console.error = orig;
+	}
+	return lines;
+}
+
+const ALL_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+test("parseThinkingLevel: accepts all seven pi levels, undefined passes through as inherit", () => {
+	for (const level of ALL_LEVELS) {
+		assert.equal(parseThinkingLevel(level, "ctx"), level);
+	}
+	assert.equal(parseThinkingLevel(undefined, "ctx"), undefined);
+});
+
+test("parseThinkingLevel: invalid value warns once per context and returns undefined (inherit)", () => {
+	const errors = captureWarnings(() => {
+		assert.equal(parseThinkingLevel("loud", "file-a"), undefined);
+		assert.equal(parseThinkingLevel("loud", "ctx"), undefined);
+		assert.equal(parseThinkingLevel(3, "ctx"), undefined, "same context: no second warning");
+		assert.equal(parseThinkingLevel("high", "ctx"), "high", "valid value after a warning still parses");
+	});
+	assert.equal(errors.length, 2, JSON.stringify(errors));
+	assert.match(errors[0], /file-a.*"loud"/);
+	assert.match(errors[1], /ctx.*"loud"/, "the 3 must be deduped into the ctx warning");
+});
+
+test("loadConfig: builtinFleet object form parses per-builtin thinking and hidden entries", () => {
+	withConfigFile(
+		{
+			builtinFleet: {
+				scout: { thinking: "low" },
+				worker: { hidden: true },
+				planner: { thinking: "high", hidden: false },
+			},
+		},
+		() => {
+			assert.deepEqual(loadConfig().builtinFleet, {
+				scout: { thinking: "low" },
+				worker: { hidden: true },
+				planner: { thinking: "high", hidden: false },
+			});
+		},
+	);
+});
+
+test("loadConfig: builtinFleet object form drops invalid entries/fields with a warning, keeps the rest", () => {
+	const errors = captureWarnings(() => {
+		withConfigFile(
+			{ builtinFleet: { scout: { thinking: "loud" }, worker: 42, planner: { hidden: "yes" }, reviewer: {} } },
+			() => {
+				assert.deepEqual(loadConfig().builtinFleet, {
+					scout: {}, // invalid thinking dropped, entry survives as on+inherit
+					planner: {}, // invalid hidden dropped
+					reviewer: {},
+					// worker: 42 is not an object — entry dropped entirely
+				});
+			},
+		);
+	});
+	assert.equal(errors.length, 3, JSON.stringify(errors));
+	const all = errors.join("\n");
+	assert.match(all, /builtinFleet\.scout\.thinking/);
+	assert.match(all, /builtinFleet\.worker/);
+	assert.match(all, /builtinFleet\.planner\.hidden/);
+});
+
+test("loadConfig: builtinFleet non-boolean, non-object value warns and falls back to true", () => {
+	const errors = captureWarnings(() => {
+		withConfigFile({ builtinFleet: "yes" }, () => {
+			assert.equal(loadConfig().builtinFleet, true);
+		});
+	});
+	assert.match(errors.join("\n"), /builtinFleet/);
+});
+
+test("loadConfig: builtinFleet boolean forms keep working (true, false)", () => {
+	withConfigFile({ builtinFleet: false }, () => {
+		assert.equal(loadConfig().builtinFleet, false);
+	});
+	withConfigFile({ builtinFleet: true }, () => {
+		assert.equal(loadConfig().builtinFleet, true);
+	});
+});
+
+test("builtinThinkingOverrides: empty for boolean forms, name→level for object entries with thinking", () => {
+	assert.deepEqual(builtinThinkingOverrides(true), {});
+	assert.deepEqual(builtinThinkingOverrides(false), {});
+	assert.deepEqual(
+		builtinThinkingOverrides({ scout: { thinking: "low" }, worker: { hidden: true }, reviewer: {} }),
+		{ scout: "low" },
+	);
+});
+
+test("saveConfig: builtinFleet object form survives a comment-preserving round trip", () => {
+	withConfigFiles({ "orchestrator.jsonc": '{ "maxTurns": 20 }' }, () => {
+		const config = loadConfig();
+		config.builtinFleet = { worker: { hidden: true, thinking: "xhigh" } };
+		saveConfig(config);
+		assert.deepEqual(loadConfig().builtinFleet, { worker: { hidden: true, thinking: "xhigh" } });
 	});
 });
 

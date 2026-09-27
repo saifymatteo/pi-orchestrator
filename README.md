@@ -81,7 +81,7 @@ The config is JSONC: comments next to any key survive every save, because the ex
   "forwardParentPrompt": true, // append the orchestrator parent's system prompt to every subagent
   "childSessions": true, // persistent sub-sessions, listed via delegate({action: "sessions"})
   "async": true, // delegate dispatches return an acceptance immediately; false = block for the final result
-  "builtinFleet": true, // include the built-in fleet: scout, planner, worker, reviewer
+  "builtinFleet": true, // built-in fleet: true/false, or per-agent overrides: { "worker": { "hidden": true, "thinking": "xhigh" } }
   "modelOverrides": {}, // pin a model per agent, e.g. { "scout": "openrouter/some-cheap-model" }
   "maxTurns": 50, // per-subagent turn budget
   "stallTimeoutMs": 600000 // hard-kill a child silent for this long (600000 = 10 min)
@@ -159,13 +159,40 @@ Default dispatch mode for the delegate tool. `true`: a dispatch without an expli
 - The per-call `async` parameter always overrides this default; chains are always blocking regardless.
 - The delegate tool description and the policy text are generated from this value, so the model's instructions always match the configured behavior.
 
-### `builtinFleet` (boolean, default `true`)
+### `builtinFleet` (boolean | object, default `true`)
 
 Include the fleet shipped with the extension: **scout** (read-only recon), **planner** (read-only planning), **worker** (general-purpose, full tools), **reviewer** (read-only + shell). User and project agents always shadow builtins by name.
 
+- `true` (default): every builtin is included. `false`: none are.
+- Object form overrides per builtin, keyed by agent name, reusing agent-frontmatter fields:
+  - `"hidden": true` excludes the builtin from the fleet — filtered before the name-merge, so a user/project agent of the same name still works.
+  - `"thinking"` sets the builtin's thinking level (see [Thinking levels](#thinking-levels)), overriding its shipped frontmatter: config outranks what you cannot edit.
+  - Builtins not listed stay included with no explicit level; entries for unknown names are inert.
+
+```jsonc
+{
+  "builtinFleet": {
+    "worker": { "thinking": "xhigh" }, // config beats the shipped frontmatter
+    "planner": { "hidden": true } // remove planner; define your own instead
+  }
+}
+```
+
+### Thinking levels
+
+The reasoning effort a subagent runs with: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. An explicit level is independent of the model — it applies even to an agent with a pinned `model` (an unsupported model/level combination passes through to pi, which errors or clamps).
+
+Set it in agent frontmatter (`thinking: high`) or, for builtins only, in the `builtinFleet` map. Precedence:
+
+1. Explicit level — for a **builtin**, the `builtinFleet` entry beats its shipped frontmatter; for a **user/project** agent, the frontmatter `thinking` is the only source.
+2. No explicit level: the dispatching session's live thinking level is inherited — but only by agents without a pinned `model`.
+3. Otherwise pi's per-model default applies.
+
+An invalid value warns once and falls back to inheritance. The shipped fleet comes tuned: scout `low`, planner `high`, worker `medium`, reviewer `high`.
+
 ### `modelOverrides` (object, default `{}`)
 
-Pins a model per agent name, e.g. `{ "scout": "openrouter/some-cheap-model" }`. Precedence: a `modelOverrides` entry beats the agent's frontmatter `model`, which beats the dispatching session's model. When the agent defines no model, the child also inherits the session's thinking level.
+Pins a model per agent name, e.g. `{ "scout": "openrouter/some-cheap-model" }`. Precedence: a `modelOverrides` entry beats the agent's frontmatter `model`, which beats the dispatching session's model. When the agent defines neither a model nor an explicit thinking level (see [Thinking levels](#thinking-levels)), the child also inherits the session's thinking level.
 
 ### `maxTurns` (positive integer, default `50`)
 
@@ -191,6 +218,7 @@ Every agent is a markdown file: YAML frontmatter plus a body that becomes the ag
 | `tools` | YAML list or comma-separated string | Restricts the child's toolset (e.g. `read, grep, find, ls`); omit for the full toolset |
 | `blockTools` | YAML list or comma-separated string | Tool matchers blocked for this agent (exact, glob, `ext:<id>`); **additive** with the global `childBlockedTools` floor: it can extend but never re-grant |
 | `model` | string | `provider/model` for this agent; falls back to the dispatching session's model |
+| `thinking` | string | Thinking level for dispatches to this agent: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; invalid values are ignored (inherit) |
 | `hidden` | boolean | `true` excludes the agent from discovery |
 | `maxTurns` | positive integer | Per-agent turn budget; overrides the config `maxTurns` |
 
@@ -205,7 +233,7 @@ maxTurns: 20
 You are scout, a fast reconnaissance agent. ...
 ```
 
-Files with a missing or non-string `name` or `description` are skipped. An invalid `maxTurns` is ignored and falls back to the config default.
+Files with a missing or non-string `name` or `description` are skipped. An invalid `maxTurns` is ignored and falls back to the config default; an invalid `thinking` is ignored and falls back to inheritance.
 
 ## Agent discovery
 

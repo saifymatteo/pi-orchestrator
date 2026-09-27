@@ -24,6 +24,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import * as jsonc from "jsonc-parser";
 
 export interface OrchestratorConfig {
@@ -45,8 +46,14 @@ export interface OrchestratorConfig {
 	 *  installed extensions' promptGuidelines, e.g. CodeGraph usage) to every
 	 *  subagent's system prompt. Default true. */
 	forwardParentPrompt: boolean;
-	/** Include the fleet shipped with the extension (user agents always win by name). */
-	builtinFleet: boolean;
+	/** Include the fleet shipped with the extension (user agents always win by
+	 *  name). Boolean form: true = all builtins (default), false = none. Object
+	 *  form: per-builtin overrides keyed by agent name — `thinking` sets the
+	 *  builtin's thinking level (outranks its shipped frontmatter), `hidden:
+	 *  true` excludes the builtin before the name-merge (a user/project agent
+	 *  of the same name still works). Unlisted builtins stay included; entries
+	 *  for unknown names are inert. */
+	builtinFleet: boolean | Record<string, BuiltinFleetEntry>;
 	/** Per-agent model overrides, e.g. { "scout": "openrouter/some-cheap-model" }. */
 	modelOverrides: Record<string, string>;
 	/** Turn budget for subagents (ADR-0006). Must be a positive integer. */
@@ -114,6 +121,100 @@ function readConfigText(): string | null {
 	}
 }
 
+/** Valid thinking levels (pi's ThinkingLevel union); `thinking` frontmatter
+ *  and `builtinFleet` entries accept exactly these strings. */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/** Per-builtin overrides in the `builtinFleet` object form. Field names match
+ *  agent frontmatter: `thinking` sets the thinking level, `hidden: true`
+ *  excludes the builtin from the fleet (pre-merge). An empty entry is valid:
+ *  builtin included, no explicit level. */
+export interface BuiltinFleetEntry {
+	thinking?: ThinkingLevel;
+	hidden?: boolean;
+}
+
+/** Contexts already warned about an invalid thinking level (warn-once per
+ *  config key / agent file — frontmatter is re-parsed on every discovery). */
+const warnedThinkingContexts = new Set<string>();
+
+/**
+ * Validate a thinking level: one of THINKING_LEVELS or undefined (= inherit).
+ * Strict, no coercion. An invalid value warns once per context and returns
+ * undefined so the caller falls back to inheritance.
+ */
+export function parseThinkingLevel(value: unknown, context: string): ThinkingLevel | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value)) {
+		return value as ThinkingLevel;
+	}
+	if (!warnedThinkingContexts.has(context)) {
+		warnedThinkingContexts.add(context);
+		console.error(
+			`[pi-orchestrator] ${context}: invalid thinking level ${JSON.stringify(value)} — expected one of: ${THINKING_LEVELS.join(", ")}. Falling back to inheritance.`,
+		);
+	}
+	return undefined;
+}
+
+/** Config-side explicit thinking levels for builtin agents (builtinFleet
+ *  object form), keyed by name. Empty for boolean forms. Consumers stamp
+ *  these onto builtin-source agents only — a user/project agent of the same
+ *  name keeps its own frontmatter (the config side exists for builtins only). */
+export function builtinThinkingOverrides(fleet: OrchestratorConfig["builtinFleet"]): Record<string, ThinkingLevel> {
+	if (typeof fleet !== "object") return {};
+	const out: Record<string, ThinkingLevel> = {};
+	for (const [name, entry] of Object.entries(fleet)) {
+		if (entry.thinking !== undefined) out[name] = entry.thinking;
+	}
+	return out;
+}
+
+function parseBuiltinFleetEntry(name: string, value: unknown): BuiltinFleetEntry | undefined {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		console.error(
+			`[pi-orchestrator] builtinFleet.${name}: expected an object ({ thinking?, hidden? }) — got ${typeof value}. Entry ignored.`,
+		);
+		return undefined;
+	}
+	const raw = value as Record<string, unknown>;
+	const entry: BuiltinFleetEntry = {};
+	if (raw.thinking !== undefined) {
+		const level = parseThinkingLevel(raw.thinking, `builtinFleet.${name}.thinking`);
+		if (level !== undefined) entry.thinking = level;
+	}
+	if (raw.hidden !== undefined) {
+		if (typeof raw.hidden === "boolean") entry.hidden = raw.hidden;
+		else {
+			console.error(
+				`[pi-orchestrator] builtinFleet.${name}.hidden: expected a boolean — got ${typeof raw.hidden}. Ignored.`,
+			);
+		}
+	}
+	return entry;
+}
+
+/** Boolean passthrough, or per-builtin object with invalid entries dropped.
+ *  undefined (absent key) and wholly invalid values return undefined → the
+ *  caller falls back to the default (true); a wholly invalid value warns. */
+function parseBuiltinFleet(value: unknown): OrchestratorConfig["builtinFleet"] | undefined {
+	if (typeof value === "boolean") return value;
+	if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+		const overrides: Record<string, BuiltinFleetEntry> = {};
+		for (const [name, entryValue] of Object.entries(value as Record<string, unknown>)) {
+			const entry = parseBuiltinFleetEntry(name, entryValue);
+			if (entry) overrides[name] = entry;
+		}
+		return overrides;
+	}
+	if (value !== undefined) {
+		console.error(
+			`[pi-orchestrator] builtinFleet: expected true, false, or a per-agent object ({ name: { thinking?, hidden? } }) — got ${typeof value}. Falling back to true.`,
+		);
+	}
+	return undefined;
+}
+
 export function loadConfig(): OrchestratorConfig {
 	try {
 		const text = readConfigText();
@@ -139,7 +240,7 @@ export function loadConfig(): OrchestratorConfig {
 				typeof raw.forwardParentPrompt === "boolean"
 					? raw.forwardParentPrompt
 					: DEFAULT_CONFIG.forwardParentPrompt,
-			builtinFleet: typeof raw.builtinFleet === "boolean" ? raw.builtinFleet : DEFAULT_CONFIG.builtinFleet,
+			builtinFleet: parseBuiltinFleet(raw.builtinFleet) ?? DEFAULT_CONFIG.builtinFleet,
 			modelOverrides:
 				raw.modelOverrides && typeof raw.modelOverrides === "object" && !Array.isArray(raw.modelOverrides)
 					? Object.fromEntries(

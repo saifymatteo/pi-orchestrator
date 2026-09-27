@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import { idleFleetWidgetLines, renderFleetLines } from "../src/delegate.ts";
 import type { Message } from "@earendil-works/pi-ai";
 import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId, parallelProgress, runStatus, taskStatus, type SingleResult } from "../src/delegate.ts";
-import { buildChildSpawnArgs, expandBlockedToolsToNames, stableSessionId } from "../src/delegate.ts";
+import { buildChildSpawnArgs, expandBlockedToolsToNames, resolveThinkingLevel, stableSessionId } from "../src/delegate.ts";
 
 // Provider-neutral model placeholders and OS-native synthetic paths — the
 // tests must not depend on any concrete model registry or drive letters.
@@ -1213,4 +1213,21 @@ test("cancel with unknown run id errors informatively; missing runId errors info
 	assert.match(unknown.content[0].text, /no live run/i);
 	const missing = await h.execute({ action: "cancel" });
 	assert.match(missing.content[0].text, /runId/i);
+});
+
+// ── resolveThinkingLevel (explicit beats inherited; two-tier pinning rule) ─
+
+test("resolveThinkingLevel: explicit thinking beats the parent level and crosses a pinned model", () => {
+	assert.equal(resolveThinkingLevel({ thinking: "low", model: "p/m" }, { thinkingLevel: "high" }), "low");
+	assert.equal(resolveThinkingLevel({ thinking: "off" }, { thinkingLevel: "high" }), "off");
+});
+
+test("resolveThinkingLevel: without explicit thinking, the parent level reaches only model-less agents", () => {
+	assert.equal(
+		resolveThinkingLevel({ thinking: undefined, model: "p/m" }, { thinkingLevel: "high" }),
+		undefined,
+		"pinned model: no inheritance (pi default applies)",
+	);
+	assert.equal(resolveThinkingLevel({ thinking: undefined }, { thinkingLevel: "high" }), "high", "model-less: inherits");
+	assert.equal(resolveThinkingLevel({ thinking: undefined }, {}), undefined, "no parent level: pi default");
 });

@@ -141,6 +141,81 @@ test("discoverAgents: project beats user, and .pi/agents beats .agents/agents at
 	fs.rmSync(project, { recursive: true, force: true });
 });
 
+test("discoverAgents: thinking frontmatter accepts valid levels, rejects invalid ones (no coercion)", () => {
+	const user = tempRoot("thinking");
+	const agentsDir = path.join(user, "agents");
+	writeAgent(agentsDir, "a.md", { name: "a", description: "valid", thinking: "high" });
+	writeAgent(agentsDir, "b.md", { name: "b", description: "invalid", thinking: "loud" });
+	writeAgent(agentsDir, "c.md", { name: "c", description: "absent" });
+
+	const byName = new Map(withUserDir(user, () => discoverAgents(baseConfig, user)).map((a) => [a.name, a]));
+	assert.equal(byName.get("a")?.thinking, "high");
+	assert.equal(byName.get("b")?.thinking, undefined);
+	assert.equal(byName.get("c")?.thinking, undefined);
+	fs.rmSync(user, { recursive: true, force: true });
+});
+
+test("discoverAgents: invalid thinking frontmatter warns once per file across repeated discovery", () => {
+	const user = tempRoot("thinkwarn");
+	const agentsDir = path.join(user, "agents");
+	writeAgent(agentsDir, "b.md", { name: "b", description: "invalid", thinking: "loud" });
+	const errors: string[] = [];
+	const orig = console.error;
+	console.error = (...args: unknown[]) => errors.push(args.join(" "));
+	try {
+		withUserDir(user, () => {
+			discoverAgents(baseConfig, user);
+			discoverAgents(baseConfig, user);
+		});
+	} finally {
+		console.error = orig;
+	}
+	assert.equal(errors.length, 1, JSON.stringify(errors));
+	assert.match(errors[0], /thinking/);
+	fs.rmSync(user, { recursive: true, force: true });
+});
+
+test("discoverAgents: builtinFleet object form hides named builtins pre-merge; others stay", () => {
+	const user = tempRoot("fleetmap");
+	const agents = withUserDir(user, () =>
+		discoverAgents({ ...baseConfig, builtinFleet: { worker: { hidden: true }, scout: { thinking: "low" } } }, user),
+	);
+	const names = agents.map((a) => a.name);
+	assert.ok(!names.includes("worker"), "hidden builtin must be excluded");
+	assert.ok(names.includes("scout"), "non-hidden builtins stay");
+	assert.ok(names.includes("planner"), "unlisted builtins stay");
+	fs.rmSync(user, { recursive: true, force: true });
+});
+
+test("discoverAgents: hiding a builtin does not block a user agent of the same name (shadowing intact)", () => {
+	const user = tempRoot("shadow");
+	writeAgent(path.join(user, "agents"), "worker.md", { name: "worker", description: "my own worker" });
+	const agents = withUserDir(user, () =>
+		discoverAgents({ ...baseConfig, builtinFleet: { worker: { hidden: true } } }, user),
+	);
+	const worker = agents.find((a) => a.name === "worker");
+	assert.ok(worker, "user worker must survive the hidden builtin");
+	assert.equal(worker.source, "user");
+	fs.rmSync(user, { recursive: true, force: true });
+});
+
+test("discoverAgents: builtinFleet thinking stamps builtin agents; a same-name user agent keeps its own", () => {
+	const user = tempRoot("stamp");
+	writeAgent(path.join(user, "agents"), "scout.md", { name: "scout", description: "my scout", thinking: "low" });
+	const agents = withUserDir(user, () =>
+		discoverAgents({ ...baseConfig, builtinFleet: { scout: { thinking: "xhigh" }, worker: { thinking: "high" } } }, user),
+	);
+	const myScout = agents.find((a) => a.name === "scout");
+	assert.ok(myScout);
+	assert.equal(myScout.source, "user");
+	assert.equal(myScout.thinking, "low", "config thinking is builtins-only: the user scout keeps its frontmatter");
+	const worker = agents.find((a) => a.name === "worker");
+	assert.ok(worker);
+	assert.equal(worker.source, "builtin");
+	assert.equal(worker.thinking, "high", "builtin worker gets the config level stamped");
+	fs.rmSync(user, { recursive: true, force: true });
+});
+
 test("discoverAgents: builtinFleet false excludes the shipped fleet; modelOverrides apply", () => {
 	const user = tempRoot("fleet");
 	const agents = withUserDir(user, () => discoverAgents(baseConfig, user));

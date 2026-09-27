@@ -12,13 +12,17 @@
  *
  * Agents with `hidden: true` frontmatter are skipped.
  * config.modelOverrides[name] overrides an agent's frontmatter model.
+ * config.builtinFleet (object form) hides or re-levels builtin agents: its
+ * `thinking` entry stamps builtin-source agents only — a user/project agent
+ * of the same name keeps its own frontmatter level.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import type { OrchestratorConfig } from "./config.ts";
+import { parseThinkingLevel, type OrchestratorConfig } from "./config.ts";
 
 export interface AgentConfig {
 	name: string;
@@ -27,6 +31,9 @@ export interface AgentConfig {
 	/** Tool matchers blocked for this agent (exact, glob, ext:<id>), from blockTools frontmatter. */
 	blockTools?: string[];
 	model?: string;
+	/** Per-agent thinking level from `thinking` frontmatter; undefined = inherit
+	 *  (parent session level for model-less agents, pi default otherwise). */
+	thinking?: ThinkingLevel;
 	/** Per-agent turn budget override (ADR-0006); positive integer or undefined. */
 	maxTurns?: number;
 	systemPrompt: string;
@@ -41,6 +48,7 @@ interface AgentFrontmatter {
 	tools?: unknown;
 	blockTools?: unknown;
 	model?: unknown;
+	thinking?: unknown;
 	maxTurns?: unknown;
 	hidden?: unknown;
 }
@@ -87,6 +95,8 @@ function loadAgentsFromDir(dir: string, source: AgentConfig["source"]): AgentCon
 			tools: parseToolList(frontmatter.tools),
 			blockTools: parseToolList(frontmatter.blockTools),
 			model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+			// Strict level validation (warn-once per file); invalid = inherit.
+			thinking: parseThinkingLevel(frontmatter.thinking, filePath),
 			// Strict positive integer: strings and other types are rejected, no coercion.
 			maxTurns:
 				typeof frontmatter.maxTurns === "number" && Number.isInteger(frontmatter.maxTurns) && frontmatter.maxTurns > 0
@@ -130,7 +140,12 @@ export function projectAgentDirs(cwd: string): string[] {
 export function discoverAgents(config: OrchestratorConfig, cwd: string = process.cwd()): AgentConfig[] {
 	const userDir = path.join(getAgentDir(), "agents");
 
-	const builtinAgents = config.builtinFleet ? loadAgentsFromDir(builtinAgentsDir(), "builtin") : [];
+	const builtinAgents =
+		config.builtinFleet === false
+			? []
+			: loadAgentsFromDir(builtinAgentsDir(), "builtin").filter(
+					(a) => !(typeof config.builtinFleet === "object" && config.builtinFleet[a.name]?.hidden === true),
+				);
 	const userAgents = loadAgentsFromDir(userDir, "user");
 
 	// Merge precedence: builtin < user < project (later wins). projectAgentDirs
@@ -152,6 +167,13 @@ export function discoverAgents(config: OrchestratorConfig, cwd: string = process
 	for (const agent of agents) {
 		const override = config.modelOverrides[agent.name];
 		if (override) agent.model = override;
+		// BuiltinFleet thinking overrides stamp onto builtin-source agents only
+		// (config outranks what the user cannot edit); a user/project agent of
+		// the same name keeps its own frontmatter level.
+		if (agent.source === "builtin" && typeof config.builtinFleet === "object") {
+			const level = config.builtinFleet[agent.name]?.thinking;
+			if (level !== undefined) agent.thinking = level;
+		}
 	}
 	return agents;
 }

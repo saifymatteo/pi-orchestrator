@@ -58,6 +58,9 @@ The warning stage of the Turn budget: when a Worker reaches the budget, it is to
 ### Hard kill
 The abort stage of the Turn budget: once the grace margin past the budget is spent, the Worker is terminated and the run is reported as failed with a turn-budget-exhausted reason, plus whatever output it produced so far.
 
+### Thinking level
+The reasoning effort a Worker runs with, from `off` to `max`. Independent of the Model: an explicit level applies even to a pinned-model Worker, while the Orchestrator's own live session level is only inherited by Workers without a pinned model. A Builtin defers to user configuration; a user-owned agent's own declaration is authoritative.
+
 ### Guardrail
 An external package (e.g. `@aliou/pi-guardrails`) that gates dangerous tool calls. The orchestrator does not ship or configure one; users install it themselves, and child pi processes inherit it automatically through pi's own extension discovery (see ADR-0005).
 

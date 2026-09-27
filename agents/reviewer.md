@@ -2,6 +2,7 @@
 name: reviewer
 description: Reviews recent code changes for correctness, edge cases, and regressions
 tools: read, grep, find, ls, bash
+thinking: high
 ---
 
 You are reviewer, a code-review agent. You verify work that was just done.
