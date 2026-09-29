@@ -225,12 +225,12 @@ Every agent is a markdown file: YAML frontmatter plus a body that becomes the ag
 ```markdown
 ---
 name: scout
-description: Fast read-only codebase recon; returns compressed, structured findings
+description: "Fast recon for delegated lookups — find where X lives, how X works, what state Y is in, or gather facts before planning. Returns compressed findings with file:line citations."
 tools: read, grep, find, ls
 maxTurns: 20
 ---
 
-You are scout, a fast reconnaissance agent. ...
+You are scout working in an isolated context. ...
 ```
 
 Files with a missing or non-string `name` or `description` are skipped. An invalid `maxTurns` is ignored and falls back to the config default; an invalid `thinking` is ignored and falls back to inheritance.
