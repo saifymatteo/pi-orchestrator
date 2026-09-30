@@ -15,3 +15,7 @@ Single-context: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
 ### Changelog
 
 `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). After a user-facing change (feature, fix, behavior change, packaging), add a bullet under the `## [Unreleased]` section in the matching Added / Changed / Fixed subsection (create the section if missing). Internal-only work (chore commits, refactors with no observable behavior change) is not listed. When bumping the version in `package.json`, rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD` with today's date, add a fresh empty `## [Unreleased]` above it, and append a compare link at the bottom.
+
+### Deployment
+
+Releases ship by pushing a `v*` tag, which triggers npm Trusted Publishing (no token needed). Follow `docs/agents/deployment.md` when asked to deploy, release, publish, or bump the version.
