@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Declare host-provided `typebox` in `peerDependencies` and drop the unused `@sinclair/typebox` dependency, fixing pi's extension-loader warnings
+
 ## [0.3.1] - 2026-09-29
 
 ### Fixed

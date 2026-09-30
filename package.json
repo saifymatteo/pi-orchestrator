@@ -39,10 +39,10 @@
     "@earendil-works/pi-agent-core": ">=0.84.0",
     "@earendil-works/pi-ai": ">=0.84.0",
     "@earendil-works/pi-coding-agent": ">=0.84.0",
-    "@earendil-works/pi-tui": ">=0.84.0"
+    "@earendil-works/pi-tui": ">=0.84.0",
+    "typebox": "*"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.52",
     "jsonc-parser": "^3.3.1"
   },
   "scripts": {
