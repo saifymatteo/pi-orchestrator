@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-30
+
 ### Fixed
 
 - Declare host-provided `typebox` in `peerDependencies` and drop the unused `@sinclair/typebox` dependency, fixing pi's extension-loader warnings
@@ -129,6 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First version of the project: orchestrator extension for pi with fleet delegation, unit tests, ADRs, and npm packaging
 
 [0.3.1]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.0...v0.3.1
+[0.3.2]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.1...v0.3.2
 [0.3.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.2.0...v0.2.1
