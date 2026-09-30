@@ -19,3 +19,7 @@ Single-context: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
 ### Deployment
 
 Releases ship by pushing a `v*` tag, which triggers npm Trusted Publishing (no token needed). Follow `docs/agents/deployment.md` when asked to deploy, release, publish, or bump the version.
+
+### Dependency overrides
+
+`package.json` overrides `brace-expansion` to `^5.0.12` (security pin — the `pi-coding-agent` shrinkwrap pins a vulnerable copy upstream). See `docs/agents/dependency-overrides.md` when an audit or Dependabot alert reopens, when updating `@earendil-works/*` packages, or when removing the override.
