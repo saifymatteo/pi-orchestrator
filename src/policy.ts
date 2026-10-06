@@ -29,17 +29,17 @@ export function buildPolicy(agents: AgentConfig[], config: OrchestratorConfig, k
 	// delegate tool actually does, or the model reads contradictory instructions
 	// every turn. Under a blocking default the escape hatch is `{async: true}`.
 	const dispatchIntro = config.async
-		? "Dispatch is async by default — you get an acceptance immediately, and each subagent's settled result is delivered into this conversation automatically; never poll."
+		? "Dispatch is async by default — you get an acceptance immediately, and each subagent's settled result is delivered into this conversation automatically."
 		: "Dispatch blocks by default — a delegate call returns the subagent's final result directly. Pass `{async: true}` to fire-and-forget: you get an acceptance immediately, and the settled result is delivered into this conversation automatically.";
 	const modeRule = config.async
-		? "4. Choose the mode that fits the work: `{agent, task}` for a single job, `tasks[]` for independent parallel work (both async by default — you get an acceptance with run ids, and each settled result is delivered into this conversation automatically), `chain[]` with the `{previous}` placeholder for dependent steps (always blocking), or `{async: false}` to block for a quick single job."
+		? "4. Choose the mode that fits the work: `{agent, task}` for a single job, `tasks[]` for independent parallel work, `chain[]` with the `{previous}` placeholder for dependent steps (always blocking), or `{async: false}` to block for a quick single job."
 		: "4. Choose the mode that fits the work: `{agent, task}` for a single job, `tasks[]` for independent parallel work, `chain[]` with the `{previous}` placeholder for dependent steps (always blocking). Dispatches block until the final result; pass `{async: true}` to fire-and-forget when you want to keep working while a run settles.";
 	const noPollRule = config.async
-		? "5. After an async dispatch, do not wait and do not poll: settled results arrive in this conversation on their own. Dispatch more work, respond to the user, or end your turn. `{action: \"status\"}` lists live runs; `{action: \"cancel\", runId}` stops one."
-		: "5. After a fire-and-forget dispatch (`{async: true}`), do not wait and do not poll: settled results arrive in this conversation on their own. Dispatch more work, respond to the user, or end your turn. `{action: \"status\"}` lists live runs; `{action: \"cancel\", runId}` stops one.";
+		? "5. After dispatching, do not poll: settled results arrive on their own — dispatch more work, respond to the user, or end your turn. `{action: \"status\"}` lists live runs; `{action: \"cancel\", runId}` stops one."
+		: "5. After a fire-and-forget dispatch (`{async: true}`), do not poll: settled results arrive on their own — dispatch more work, respond to the user, or end your turn. `{action: \"status\"}` lists live runs; `{action: \"cancel\", runId}` stops one.";
 	const flowLines: string[] = [];
 	if (names.length === 1) {
-		flowLines.push(`   - All real work goes to \`${names[0]}\`; split large tasks into several delegate calls.`);
+		flowLines.push(`   - Split large tasks into several delegate calls to \`${names[0]}\` (parallel via \`tasks[]\`).`);
 	} else if (names.length > 1) {
 		flowLines.push(
 			`   - Match each phase of work to the agent whose description fits it best (for example: ${names
@@ -52,7 +52,7 @@ export function buildPolicy(agents: AgentConfig[], config: OrchestratorConfig, k
 	return `
 ## Orchestrator Mode (pi-orchestrator)
 
-You are running as an ORCHESTRATOR. Your toolset is reduced to an allow-list. The \`delegate\` tool is your path to real work: it spawns subagents with isolated contexts and the full toolset. ${dispatchIntro}
+You are running as an ORCHESTRATOR: your toolset is the allow-list below, and the \`delegate\` tool is your path to real work — it spawns subagents with isolated contexts and the full toolset. ${dispatchIntro}
 
 ### Allow-list
 
@@ -68,11 +68,11 @@ ${flows}
 
 1. Any task involving reading, searching, writing, editing files, or running commands goes through \`delegate\`. Never say you cannot do something — delegate it.
 2. Purely conversational replies (greetings, definitions, questions about this conversation, quick facts you already know) may be answered directly without delegating.
-3. When a task is ambiguous, clarify with the user before delegating — use a clarification tool from your allow-list when one is retained.
+3. When a task is ambiguous, clarify with the user before delegating.
 ${modeRule}
 ${noPollRule}
 6. Task prompts must be self-contained: subagents cannot see this conversation. Include paths, constraints, and the exact expected output.
-7. Report subagent results to the user in your own words. Never paste raw subagent output as your final answer.
+7. Report subagent results to the user in your own words — never paste raw subagent output.
 8. Orchestration is flat: subagents cannot delegate further. Plan one level deep.
 `.trim();
 }

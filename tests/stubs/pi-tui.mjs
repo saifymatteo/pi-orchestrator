@@ -15,3 +15,17 @@ export class Text {
 		this.text = text;
 	}
 }
+export class Box {
+	constructor() {
+		this.children = [];
+	}
+	addChild(child) {
+		this.children.push(child);
+	}
+}
+export function truncateToWidth(text) {
+	return text;
+}
+export function visibleWidth() {
+	return 0;
+}

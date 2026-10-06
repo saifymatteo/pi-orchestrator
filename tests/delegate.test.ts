@@ -682,8 +682,10 @@ test("registered schema enumerates the live fleet on all agent-name fields", () 
 });
 
 test("description tells the model to use exact fleet names and how to discover them", () => {
-	assert.match(populatedDelegateTool.description, /never invent one/i);
-	assert.match(populatedDelegateTool.description, /\{action: 'list'\}/);
+	assert.match(populatedDelegateTool.description, /exact fleet names/i);
+	// The action vocabulary lives in the parameter schema, not the description —
+	// but "list first" must still point the model at discovery when unsure.
+	assert.match(populatedDelegateTool.description, /list first/i);
 });
 
 test("list action returns the live fleet without spawning any subagent", async () => {
@@ -955,6 +957,37 @@ test("renderResult chain mid-run: current step ⏳ rather than ✗, completed st
 	assert.ok(text.includes("✓"), text);
 	assert.ok(!text.includes("✗"), `chain mid-run must not read as failure: ${text}`);
 	assert.match(text, /Step 1/);
+});
+
+function acceptedChildrenText(details: any, expanded: boolean): string {
+	const out: any = delegateTool.renderResult(
+		{ content: [{ type: "text", text: "raw acceptance text" }], details },
+		{ expanded },
+		passthroughTheme,
+		undefined,
+	);
+	return out.children.map((c: any) => c.text ?? "").join("\n");
+}
+
+test("renderResult accepted collapsed: per-run headers, no task, no boilerplate", () => {
+	const text = acceptedChildrenText(
+		{ mode: "accepted", results: [], accepted: [{ runId: 7, agent: "scout", task: "the whole task text" }] },
+		false,
+	);
+	assert.ok(text.includes("Run 7 — scout"), text);
+	assert.ok(text.includes("accepted"), text);
+	assert.ok(!text.includes("the whole task text"), `collapsed must not show the task: ${text}`);
+	assert.ok(!text.includes("Results are delivered automatically"), `collapsed must not show the boilerplate: ${text}`);
+});
+
+test("renderResult accepted expanded: whole task, no boilerplate", () => {
+	const longTask = "do the thing ".repeat(30); // far past the old 40-char preview
+	const text = acceptedChildrenText(
+		{ mode: "accepted", results: [], accepted: [{ runId: 7, agent: "scout", task: longTask }] },
+		true,
+	);
+	assert.ok(text.includes(longTask), "expanded must show the task untruncated");
+	assert.ok(!text.includes("Results are delivered automatically"), "the no-poll note is model-facing only, never rendered");
 });
 
 test("renderResult expanded parallel mid-run: no failure icon while tasks are working", () => {

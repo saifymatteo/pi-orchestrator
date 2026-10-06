@@ -36,14 +36,13 @@ import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-co
 import type { Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { Box, Container, Markdown, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { AgentConfig } from "./agents.ts";
 import { toolMatchesAnyMatcher } from "./config.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
-const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 /** Turn budget default (ADR-0006); overridden by orchestrator.json `maxTurns`
  *  (via deps.getMaxTurns) or per-agent frontmatter `maxTurns`. */
@@ -651,6 +650,10 @@ export interface SubagentDetails {
 	/** Async run bookkeeping (ADR-0014): deliveries echo the acceptance's run id. */
 	runId?: number;
 	cancelled?: boolean;
+	/** Async acceptance (ADR-0014): the dispatched runs awaiting delivery, so
+	 *  the acceptance render can show agent + full task instead of the raw
+	 *  truncated instruction text. */
+	accepted?: Array<{ runId: number; agent: string; task: string }>;
 }
 
 /**
@@ -1925,20 +1928,124 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 
 	activeWatcher = watcher;
 
-	// Transcript rendering for delivered run results: a compact push view —
-	// status icon, run id, agent, task, first output line; expands to the
-	// full delivered text (same content the model sees).
+	// Collapsed cap for a delivered run-result push: one visual line, overflow
+	// cut at terminal width with the same dim hint compact-tools/bg-bash use.
+	const MAX_RUN_RESULT_LINES = 1;
+
+	function capRunResultLines(text: string, maxLines: number, width: number, theme: any): string[] {
+		const lines = new Text(text, 0, 0).render(width);
+		if (lines.length <= maxLines) return lines;
+		const hidden = lines.length - maxLines;
+		const hint = theme.fg("dim", ` … (+${hidden} more line${hidden === 1 ? "" : "s"})`);
+		const kept = lines.slice(0, maxLines);
+		const last = kept[kept.length - 1].replace(/\s+$/, "");
+		const avail = Math.max(0, width - visibleWidth(hint));
+		kept[kept.length - 1] = avail > 0 ? truncateToWidth(last, avail, "") + hint : truncateToWidth(last, width, "…");
+		return kept;
+	}
+
+	// Stateful rendered row for a delivered async run result (ADR-0014), mirroring
+	// bg-bash's BgResultRow: flush single-line collapsed view with the cap hint,
+	// click-to-expand via handleMouse (same event contract tool rows use), and
+	// setExpanded for ctrl+o (app.tools.expand) which the host message component
+	// forwards. Purple customMessageBg keeps it visually distinct from synchronous
+	// delegate tool rows.
+	class RunResultRow {
+		private expanded: boolean;
+		private cachedWidth?: number;
+		private cachedLines?: string[];
+		private message: any;
+		private theme: any;
+
+		constructor(message: any, theme: any, expanded = false) {
+			this.message = message;
+			this.theme = theme;
+			this.expanded = expanded;
+		}
+
+		setExpanded(expanded: boolean): void {
+			if (this.expanded !== expanded) {
+				this.expanded = expanded;
+				this.cachedLines = undefined;
+			}
+		}
+
+		invalidate(): void {
+			this.cachedLines = undefined;
+		}
+
+		handleMouse(event: { type?: string; button?: string }): { handled: boolean } | undefined {
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			this.setExpanded(!this.expanded);
+			return { handled: true };
+		}
+
+		render(width: number): string[] {
+			if (this.cachedLines === undefined || this.cachedWidth !== width) {
+				const theme = this.theme;
+				const details = (this.message?.details ?? {}) as SubagentDetails;
+				const r = details.results?.[0];
+				const fullText =
+					Array.isArray(this.message?.content) && this.message.content[0]?.type === "text"
+						? this.message.content[0].text
+						: "(run result)";
+				const status = r ? taskStatus(r, false) : "failed";
+				const failed = details.cancelled === true || status === "failed";
+				const icon = theme.fg(failed ? "error" : "success", failed ? "✗" : "✓");
+				const statusLabel = details.cancelled
+					? "cancelled"
+					: status === "failed"
+						? `failed${r?.stopReason ? ` (${r.stopReason})` : ""}`
+						: "completed";
+				const header =
+					`${icon} ${theme.fg("toolTitle", theme.bold(`Run ${details.runId ?? "?"} — ${r?.agent ?? "?"}`))}` +
+					theme.fg("dim", ` · ${statusLabel}`);
+
+				if (!this.expanded) {
+					this.cachedLines = capRunResultLines(header, MAX_RUN_RESULT_LINES, width, theme);
+				} else {
+					const lines = [header, ""];
+					// Task block: the same instruction the delegate tool carried, whole
+					// — dimmed so it reads as context, not agent output.
+					if (r?.task) lines.push(theme.fg("muted", "Task:"), theme.fg("dim", r.task), "");
+					// Skip the delivery header line (starts with ✓/✗) — the row header
+					// already carries that. The agent's message is plain text (reads as
+					// a message); bookkeeping lines are dimmed so metadata and content
+					// are distinguishable at a glance. Blank line before the first
+					// metadata line separates content from bookkeeping.
+					let metaStarted = false;
+					for (const line of fullText.split("\n")) {
+						const trimmed = line.trim();
+						if (!trimmed || trimmed.startsWith("✓") || trimmed.startsWith("✗")) continue;
+						const isMeta =
+							trimmed.startsWith("Files touched:") ||
+							trimmed.startsWith("Subagent session:") ||
+							trimmed.startsWith("[Output truncated:") ||
+							trimmed === "Cancelled by orchestrator.";
+						if (isMeta && !metaStarted) {
+							lines.push("");
+							metaStarted = true;
+						}
+						lines.push(isMeta ? theme.fg("dim", line) : line);
+					}
+					this.cachedLines = new Text(lines.join("\n"), 0, 0).render(width);
+				}
+				this.cachedWidth = width;
+			}
+			return this.cachedLines;
+		}
+	}
+
+	// Transcript rendering for delivered run results (ADR-0014): a bg-bash-style
+	// push view on the purple customMessage background — collapsed = single capped
+	// ✓/✗ status line, click or ctrl+o expands to the full delivered text (same
+	// content the model sees). Box adds the outputPad left/right padding tinted
+	// purple plus one padding line above and below. RunResultRow owns its own
+	// expanded state for clicks; the host forwards ctrl+o via setExpanded.
 	pi.registerMessageRenderer?.(RUN_RESULT_MESSAGE_TYPE, (message: any, options: any, theme: any) => {
-		const details = message?.details as SubagentDetails | undefined;
-		const r = details?.results?.[0];
-		const fullText = Array.isArray(message?.content) && message.content[0]?.type === "text" ? message.content[0].text : "(run result)";
-		if (!r) return new Text(fullText, 0, 0);
-		const icon = taskStatus(r, false) === "failed" ? "✗" : "✓";
-		const head = `${icon} Run ${details.runId ?? "?"} — ${r.agent}`;
-		if (options?.expanded === true) return new Text(`${theme.fg("toolTitle", theme.bold(head))}\n${fullText}`, 0, 0);
-		const bodyLines = fullText.split("\n").map((l: string) => l.trim()).filter(Boolean);
-		const first = bodyLines.find((l: string) => !l.startsWith("✓") && !l.startsWith("✗")) ?? "";
-		return new Text(`${theme.fg("toolTitle", theme.bold(head))} ${theme.fg("muted", r.task)}\n${theme.fg("muted", first.slice(0, 160))}`, 0, 0);
+		const box = new Box(options?.outputPad, 1, (t: string) => theme.bg("customMessageBg", t));
+		box.addChild(new RunResultRow(message, theme, options?.expanded === true));
+		return box;
 	});
 
 	// ESC kill for async children (ADR-0014): pi exposes no abort event, but an
@@ -1955,20 +2062,18 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 	pi.registerTool({
 		name: "delegate",
 		label: "Delegate",
+		// Model-facing description: dispatch behaviour and the no-poll guardrail
+		// only. Modes, actions, and escape hatches live in the parameter schema
+		// (single source of truth); "delegate is the way to do work" lives in the
+		// engaged-mode policy text (src/policy.ts) — restating it here would be
+		// false in AUTO mode.
 		description:
 			"Delegate work to a fleet subagent with an isolated context and full tools. " +
 			(asyncDefault
-				? "Dispatch is ASYNC BY DEFAULT: the call returns an acceptance (run id) immediately and each settled result is delivered into this conversation automatically — never poll. "
-				: "Dispatch is BLOCKING BY DEFAULT (orchestrator.jsonc async: false): the call waits for the subagent's final result. Pass {async: true} to fire-and-forget — the acceptance returns immediately and each settled result is delivered into this conversation automatically. ") +
-			"Modes: single ({agent, task}), parallel ({tasks: [{agent, task}]}, max 8), " +
-			"chain ({chain: [{agent, task}]}, sequential and blocking, {previous} placeholder inserts the prior step's output), " +
-			(asyncDefault
-				? "blocking escape hatch ({async: false} waits for the final result — quick lookups), "
-				: "fire-and-forget escape hatch ({async: true} returns an acceptance immediately), ") +
-			"discovery/control ({action: 'list'} fleet; {action: 'sessions'} sub-sessions; {action: 'status'} live runs; {action: 'cancel', runId} kill one). " +
-			"Agent names must be exact fleet names — never invent one; when unsure, list first. " +
-			"Each dispatch returns a Subagent session path — the subagent's persistent pi transcript — that you can pass to another subagent for a deeper look. " +
-			"This is your only way to read, write, edit, search, or run commands.",
+				? "Dispatch is async by default: the call returns an acceptance (run id) immediately and each settled result is delivered into this conversation automatically — end your turn or keep working after dispatch. "
+				: "Dispatch blocks by default (orchestrator.jsonc async: false): the call returns the subagent's final result directly. ") +
+			"Agent names are exact fleet names — when unsure, list first. " +
+			"Each dispatch returns a Subagent session path (the subagent's persistent pi transcript) you can hand to another subagent for a deeper look.",
 		parameters: buildDelegateParams(fleetNames, asyncDefault),
 
 		async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {
@@ -2169,11 +2274,15 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 						text:
 							`Accepted ${runs.length === 1 ? `run ${runs[0].runId} — ${runs[0].agent}` : `${runs.length} runs`}:\n` +
 							runs.map((r) => `- run ${r.runId} — ${r.agent}: "${truncateWithEllipsis(r.task.replace(/\s+/g, " "), MAX_TASK_SUMMARY_CHARS)}"`).join("\n") +
-							"\n\nResults are delivered automatically as each subagent settles — do not poll and do not keep this turn alive waiting. Dispatch more work, respond to the user, or end your turn. " +
-							'{action: "status"} lists live runs; {action: "cancel", runId} stops one; {action: "sessions"} lists finished transcripts.',
+							"\n\nResults are delivered automatically as each run settles — end your turn or keep working; do not poll. " +
+							"Actions: {action: \"status\"} live runs · {action: \"cancel\", runId} stop one · {action: \"sessions\"} transcripts.",
 					},
 				],
-				details: { mode: "accepted", results: [] } satisfies SubagentDetails,
+				details: {
+					mode: "accepted",
+					results: [],
+					accepted: runs.map((r) => ({ runId: r.runId, agent: r.agent, task: r.task })),
+				} satisfies SubagentDetails,
 			});
 
 			// Unknown-agent validation for the async path: a synchronous error at
@@ -2456,68 +2565,63 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 		},
 
 		renderCall(args: any, theme: any, _context: any) {
+			// No instruction text here: the task prompt is the orchestrator's
+			// message to the subagent, not something the user needs in the call
+			// row — it is shown whole in the expanded result instead.
 			if (args.chain && args.chain.length > 0) {
 				let text =
 					theme.fg("toolTitle", theme.bold("delegate ")) +
 					theme.fg("accent", `chain (${args.chain.length} steps)`);
-				for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
-					const step = args.chain[i];
-					const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
-					const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
-					text +=
-						"\n  " +
-						theme.fg("muted", `${i + 1}.`) +
-						" " +
-						theme.fg("accent", step.agent) +
-						theme.fg("dim", ` ${preview}`);
+				for (let i = 0; i < Math.min(args.chain.length, 5); i++) {
+					text += `\n  ${theme.fg("muted", `${i + 1}.`)} ${theme.fg("accent", args.chain[i].agent)}`;
 				}
-				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
+				if (args.chain.length > 5) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 5} more`)}`;
 				return new Text(text, 0, 0);
 			}
 			if (args.tasks && args.tasks.length > 0) {
 				let text =
 					theme.fg("toolTitle", theme.bold("delegate ")) +
 					theme.fg("accent", `parallel (${args.tasks.length} tasks)`);
-				for (const t of args.tasks.slice(0, 3)) {
-					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
-					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
+				for (const t of args.tasks.slice(0, 5)) {
+					text += `\n  ${theme.fg("accent", t.agent)}`;
 				}
-				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+				if (args.tasks.length > 5) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 5} more`)}`;
 				return new Text(text, 0, 0);
 			}
 			const agentName = args.agent || "...";
-			const preview = args.task ? (args.task.length > 60 ? `${args.task.slice(0, 60)}...` : args.task) : "...";
-			const text =
-				theme.fg("toolTitle", theme.bold("delegate ")) +
-				theme.fg("accent", agentName) +
-				`\n  ${theme.fg("dim", preview)}`;
+			const text = theme.fg("toolTitle", theme.bold("delegate ")) + theme.fg("accent", agentName);
 			return new Text(text, 0, 0);
 		},
 
 		renderResult(result: any, { expanded, isPartial }: any, theme: any, context: any) {
 			const details = result.details as SubagentDetails | undefined;
+			// Async acceptance (ADR-0014): compact dispatched-runs view. Collapsed is
+			// one header line per run; ctrl+o expands to the full task text plus the
+			// dimmed no-poll instruction. The raw content text is model-facing only.
+			if (details?.mode === "accepted") {
+				const container = new Container();
+				for (const a of details.accepted ?? []) {
+					container.addChild(
+						new Text(
+							`${theme.fg("warning", "◐")} ${theme.fg("toolTitle", theme.bold(`Run ${a.runId} — ${a.agent}`))}` +
+								theme.fg("dim", " · accepted"),
+							0,
+							0,
+						),
+					);
+					if (expanded && a.task) container.addChild(new Text(theme.fg("dim", a.task), 0, 0));
+				}
+				if (!expanded) {
+					container.addChild(new Text(theme.fg("muted", "(Ctrl+O for task)"), 0, 0));
+				}
+				return container;
+			}
 			if (!details || details.results.length === 0) {
 				const text = result.content[0];
 				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 			}
 
 			const mdTheme = getMarkdownTheme();
-
-			const renderDisplayItems = (items: DisplayItem[], limit?: number) => {
-				const toShow = limit ? items.slice(-limit) : items;
-				const skipped = limit && items.length > limit ? items.length - limit : 0;
-				let text = "";
-				if (skipped > 0) text += theme.fg("muted", `... ${skipped} earlier items\n`);
-				for (const item of toShow) {
-					if (item.type === "text") {
-						const preview = expanded ? item.text : item.text.split("\n").slice(0, 3).join("\n");
-						text += `${theme.fg("toolOutput", preview)}\n`;
-					} else {
-						text += `${theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme))}\n`;
-					}
-				}
-				return text.trimEnd();
-			};
 
 			const aggregateUsage = (results: SingleResult[]) => {
 				const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
@@ -2578,17 +2682,16 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 					return container;
 				}
 
+				// Collapsed: one status line per agent, like the delivered run-result
+				// push — the full task and output live in the expanded view.
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
-				else if (displayItems.length === 0)
-					text += `\n${theme.fg("muted", isRunning ? "(running...)" : "(no output)")}`;
-				else {
-					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
-					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
-				}
+				else if (isRunning) text += ` ${theme.fg("muted", "(running...)")}`;
+				else if (!finalOutput) text += ` ${theme.fg("muted", "(no output)")}`;
 				const usageStr = formatUsageStats(r.usage, r.model);
 				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
+				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				return new Text(text, 0, 0);
 			}
 
@@ -2646,16 +2749,16 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 			}
 
 			let text = `${icon} ${theme.fg("toolTitle", theme.bold(details.mode + " "))}${theme.fg("accent", `${successCount}/${total}`)}`;
+			// Collapsed: one status line per agent — no per-agent output.
 			for (const r of details.results) {
-				const taskSt = taskStatus(r, callIsPartial);
-				const rIcon = statusIcon(theme, taskSt);
-				const displayItems = getDisplayItems(r.messages);
-				text += `\n\n${theme.fg("muted", r.step ? `─── Step ${r.step}: ` : "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
-				if (displayItems.length === 0) text += `\n${theme.fg("muted", taskSt === "running" ? "(running...)" : "(no output)")}`;
-				else text += `\n${renderDisplayItems(displayItems, 5)}`;
+				const st = taskStatus(r, callIsPartial);
+				const rIcon = statusIcon(theme, st);
+				text +=
+					`\n${rIcon} ${theme.fg("muted", r.step ? `Step ${r.step}: ` : "")}${theme.fg("accent", r.agent)}` +
+					(st === "running" ? theme.fg("muted", " (running...)") : "");
 			}
 			const usageStr = formatUsageStats(aggregateUsage(details.results));
-			if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
+			if (usageStr) text += `\n${theme.fg("dim", `Total: ${usageStr}`)}`;
 			text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 			return new Text(text, 0, 0);
 		},

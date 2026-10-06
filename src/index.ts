@@ -441,10 +441,11 @@ export default function (pi: any) {
 		updateIdleWidget();
 		if (!opts?.quiet && ctx?.ui?.notify) {
 			ctx.ui.notify(
+				// AUTO is an intentional state, not a problem (ADR-0003): info severity.
 				next
 					? `Orchestrator ENGAGED · fleet: ${discoverAgents(config).map((a) => a.name).join(", ") || "(empty)"}`
 					: "Orchestrator: AUTO — toolset returned to pi, delegate always available (persisted to orchestrator.jsonc)",
-				next ? "info" : "warning",
+				"info",
 			);
 		}
 	}
@@ -465,10 +466,11 @@ export default function (pi: any) {
 		// `auto` when it does not (ADR-0003).
 		updateIdleWidget();
 		if (!engaged && ctx?.ui?.notify) {
-			// Defuse the "why isn't it forcing?" surprise (ADR-0003)
+			// Defuse the "why isn't it forcing?" surprise (ADR-0003). AUTO is an
+			// intentional state, not a problem: info severity, not warning.
 			ctx.ui.notify(
 				"Orchestrator: AUTO (enabled:false) — toolset left to pi and other extensions; delegate always available. Run /orchestrator to engage.",
-				"warning",
+				"info",
 			);
 		}
 	});

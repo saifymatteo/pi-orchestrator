@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Engaged-mode policy text audited and de-duplicated: async-delivery semantics stated once (intro rule) instead of three times, allow-list folded into the intro sentence, single-agent flow line trimmed to the live half, vague rule-3 clause dropped; ~1 in 7 tokens off every engaged turn
+- Trim the delegate tool description and async acceptance text (model-facing context): modes/actions/escape-hatch restatements removed (they live in the parameter schema), the "only way to read/write" line removed (it duplicates the engaged-mode policy text and is false in AUTO mode), and the no-poll boilerplate compressed
+- Delivered background subagent results now render like bg-bash's finished-job rows: a single capped ✓/✗ status line on the purple `customMessage` background with output padding, click- or ctrl+o-expandable to the full delivered text
+- Delegate tool render no longer shows the task/instruction text in the call row (agent names only); the collapsed result is a compact per-agent status line, and ctrl+o expansion shows the full task text untruncated plus the agent's output
+- Async delegate acceptance (the "Accepted run N" result) renders as a compact per-run row (◐ Run N — agent · accepted) instead of a full plain-text block; ctrl+o expands to the full task text. The no-poll instruction stays in the model-facing text only and is never rendered
+- Delivered run-result rows now show the originating task (dimmed, untruncated) with blank-line spacing between header, task, output, and metadata in the expanded view
+- Orchestrator AUTO notifications (startup notice and `/orchestrator` disengage) now use info severity instead of warning — AUTO is an intentional state, not a problem
 ## [0.4.0] - 2026-10-06
 
 ### Changed
