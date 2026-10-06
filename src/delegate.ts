@@ -927,16 +927,16 @@ function resolvePiInvocation(): { command: string; argsPrefix: string[] } {
 	return piInvocation;
 }
 
-// ── Child spawn policy (ADR-0008) ───────────────────────────────────────────
+// ── Child spawn policy (ADR-0008, ADR-0017) ────────────────────────────────
 
 /**
  * Expand blocked matchers to concrete tool names against the parent's tool
  * registry (ADR-0008): every matcher — exact, glob, or ext:<id> — is resolved
  * via toolMatchesAnyMatcher (same case-insensitive semantics as the ADR-0007
  * gate), and each matching tool's name is collected once, in first-seen order.
- * The names feed pi's `--exclude-tools` comma list, which takes concrete names
- * only. Matchers that expand to nothing are skipped silently — the interception
- * gate (ADR-0007) still enforces them child-side.
+ * The names feed pi's `--exclude-tools` comma list. Matchers that expand to
+ * nothing are skipped silently — the interception gate (ADR-0007) still
+ * enforces them child-side.
  */
 export function expandBlockedToolsToNames(
 	matchers: string[],
@@ -954,10 +954,51 @@ export function expandBlockedToolsToNames(
 }
 
 /**
+ * Matchers passable verbatim to pi's `--exclude-tools` (ADR-0017). pi >= 1.0.4
+ * documents the flag's matching (verified in the 1.0.4 binary): entries are
+ * exact names (case-SENSITIVE Set membership) or patterns where `*` matches
+ * any characters; every other regex-ish character is escaped literal, so `?`
+ * is NOT a wildcard. `ext:<id>` matches extension ids, which the flag never
+ * sees — excluded here and resolved parent-side instead. On older pi the
+ * patterns match nothing and the ADR-0007 gate enforces child-side (fail-soft,
+ * the pre-ADR-0008 behavior).
+ */
+export function passThroughMatchers(matchers: string[]): string[] {
+	return matchers.filter((m) => !m.startsWith("ext:") && !m.includes("?"));
+}
+
+/**
+ * The `--exclude-tools` comma list for a child spawn (ADR-0017): pi-accepted
+ * matchers (exact, `*` glob) passed through verbatim PLUS the parent-side
+ * expansion (expandBlockedToolsToNames). The pass-through lets the CHILD's own
+ * registry do the filtering — covering tools the parent cannot see (e.g. loaded
+ * by a per-task cwd's project extensions), which the gate previously backstopped
+ * alone. The expansion is retained because it resolves case-insensitively to
+ * registry-case names (pi's flag matching is case-sensitive) and is the only
+ * way to express `ext:<id>` and `?` matchers. Deduped case-SENSITIVELY (pi's
+ * flag matching is case-sensitive, so two spellings of one matcher block both;
+ * duplicates are harmless — pi stores names in a Set), pass-through entries
+ * first, first-seen order otherwise.
+ */
+export function resolveChildExcludeTools(
+	matchers: string[],
+	tools: Array<{ name: string; sourceInfo?: unknown }>,
+): string[] {
+	const result: string[] = [];
+	const seen = new Set<string>();
+	for (const entry of [...passThroughMatchers(matchers), ...expandBlockedToolsToNames(matchers, tools)]) {
+		if (seen.has(entry)) continue;
+		seen.add(entry);
+		result.push(entry);
+	}
+	return result;
+}
+
+/**
  * Pure builder for the child pi process arguments (RPC mode). Spawn-time flags
  * only — the caller appends `--append-system-prompt` after the prompt temp file
- * is written. Flag semantics per pi's usage docs: `--exclude-tools` is a
- * comma-separated denylist (single occurrence, concrete names only);
+ * is written. Flag semantics per pi's usage docs: `--exclude-tools` is a single
+ * comma-separated denylist accepting exact names and `*` patterns (ADR-0017);
  * `--no-extensions` disables extension discovery and `-e` re-adds specific
  * extension sources (repeatable). Extension loading is derived from the
  * `extensions` list: non-empty ⇒ `--no-extensions` plus one `-e` per entry
@@ -979,8 +1020,9 @@ export function buildChildSpawnArgs(opts: {
 	/** Extension sources (orchestrator.json `childExtensions`) loaded via pi's
 	 *  repeatable `-e` flag; non-empty also implies `--no-extensions`. */
 	extensions: string[];
-	/** Concrete tool names unregistered at spawn via `--exclude-tools`
-	 *  (ADR-0008) — already expanded from matchers via expandBlockedToolsToNames. */
+	/** Tool names and `*` patterns unregistered at spawn via `--exclude-tools`
+	 *  (ADR-0008, ADR-0017) — already resolved from matchers via
+	 *  resolveChildExcludeTools. */
 	excludeTools: string[];
 	/** Persistent sub-session (ADR-0011): omit `--no-session` so the child's
 	 *  transcript survives; pi creates the file lazily on first message. */
@@ -1228,11 +1270,13 @@ async function runSingleAgent(opts: RunSingleAgentOptions): Promise<SingleResult
 		thinkingLevel: resolveThinkingLevel(agent, dispatchDefaults),
 		tools: agent.tools,
 		extensions,
-		// Always-on unregistration (ADR-0008): every matcher — exact, glob, ext:<id>
-		// — is expanded against the parent's tool registry and removed at spawn;
-		// the interception gate (PI_ORCHESTRATOR_BLOCKED_TOOLS env) stays as backstop
-		// for tools a divergent child loads that the parent cannot see.
-		excludeTools: expandBlockedToolsToNames(blockedTools, getAllTools()),
+		// Always-on unregistration (ADR-0008, ADR-0017): pi-accepted matchers
+		// (exact, * glob) pass through to --exclude-tools verbatim so the CHILD's
+		// registry is filtered (covers tools the parent cannot see); ext:<id> and
+		// ? matchers resolve parent-side; the interception gate
+		// (PI_ORCHESTRATOR_BLOCKED_TOOLS env) stays as backstop for tools a
+		// divergent child loads that neither path covers.
+		excludeTools: resolveChildExcludeTools(blockedTools, getAllTools()),
 		persistSessions,
 		sessionDir,
 	});

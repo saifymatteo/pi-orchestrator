@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import { idleFleetWidgetLines, renderFleetLines } from "../src/delegate.ts";
 import type { Message } from "@earendil-works/pi-ai";
 import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId, parallelProgress, runStatus, taskStatus, type SingleResult } from "../src/delegate.ts";
-import { buildChildSpawnArgs, expandBlockedToolsToNames, resolveThinkingLevel, stableSessionId } from "../src/delegate.ts";
+import { buildChildSpawnArgs, expandBlockedToolsToNames, passThroughMatchers, resolveChildExcludeTools, resolveThinkingLevel, stableSessionId } from "../src/delegate.ts";
 
 // Provider-neutral model placeholders and OS-native synthetic paths — the
 // tests must not depend on any concrete model registry or drive letters.
@@ -533,6 +533,62 @@ test("expandBlockedToolsToNames: matchers that expand to nothing are skipped sil
 test("expandBlockedToolsToNames: empty matchers ⇒ []", () => {
 	const tools = [tool("advisor", nm("x", "i.js")), tool("todo", undefined)];
 	assert.deepEqual(expandBlockedToolsToNames([], tools), []);
+});
+
+// ── passThroughMatchers / resolveChildExcludeTools (ADR-0017) ────────────────
+// pi >= 1.0.4 --exclude-tools semantics (verified in the 1.0.4 binary): exact
+// names via case-SENSITIVE Set membership, `*` as the only wildcard (? is
+// escaped literal), ext:<id> never matches (the flag sees tool names only).
+
+test("passThroughMatchers: exact and * glob pass through; ext: and ? matchers do not", () => {
+	assert.deepEqual(passThroughMatchers(["advisor", "hindsight_*", "ext:@luxusai/pi-hindsight", "what?_tool"]), [
+		"advisor",
+		"hindsight_*",
+	]);
+	assert.deepEqual(passThroughMatchers([]), []);
+});
+
+test("resolveChildExcludeTools: parent-visible exact matcher dedupes to the registry name", () => {
+	const tools = [tool("advisor", nm("@l/advisor", "i.js")), tool("todo", undefined)];
+	assert.deepEqual(resolveChildExcludeTools(["advisor"], tools), ["advisor"]);
+});
+
+test("resolveChildExcludeTools: case-mismatched exact matcher keeps both spellings (flag is case-sensitive; expansion fixes parent-visible case)", () => {
+	const tools = [tool("advisor", nm("@l/advisor", "i.js"))];
+	assert.deepEqual(resolveChildExcludeTools(["ADVISOR"], tools), ["ADVISOR", "advisor"]);
+});
+
+test("resolveChildExcludeTools: glob passes through AND expands to parent-visible names", () => {
+	const tools = [
+		tool("hindsight_recall", nm("@luxusai/pi-hindsight", "i.js")),
+		tool("hindsight_retain", nm("@luxusai/pi-hindsight", "i.js")),
+		tool("todo", undefined),
+	];
+	assert.deepEqual(resolveChildExcludeTools(["hindsight_*"], tools), ["hindsight_*", "hindsight_recall", "hindsight_retain"]);
+});
+
+test("resolveChildExcludeTools: ext:<id> matcher is expanded only, never passed through", () => {
+	const tools = [tool("hindsight_recall", nm("@luxusai/pi-hindsight", "i.js")), tool("other_tool", nm("plain-pkg", "i.js"))];
+	assert.deepEqual(resolveChildExcludeTools(["ext:@luxusai/pi-hindsight"], tools), ["hindsight_recall"]);
+});
+
+test("resolveChildExcludeTools: ? matcher is expanded only, never passed through", () => {
+	const tools = [tool("whats_tool", undefined)];
+	assert.deepEqual(resolveChildExcludeTools(["what?_tool"], tools), ["whats_tool"]);
+});
+
+test("resolveChildExcludeTools: matcher that expands to nothing still passes through (child-side coverage)", () => {
+	const tools = [tool("todo", undefined)];
+	assert.deepEqual(resolveChildExcludeTools(["missing_*", "gone_tool"], tools), ["missing_*", "gone_tool"]);
+});
+
+test("resolveChildExcludeTools: dedupes exact duplicates across pass-through and expansion (case variants stay — the flag is case-sensitive)", () => {
+	const tools = [tool("advisor", nm("@l/advisor", "i.js"))];
+	assert.deepEqual(resolveChildExcludeTools(["advisor", "ADVISOR", "Advisor"], tools), ["advisor", "ADVISOR", "Advisor"]);
+});
+
+test("resolveChildExcludeTools: empty matchers ⇒ []", () => {
+	assert.deepEqual(resolveChildExcludeTools([], [tool("todo", undefined)]), []);
 });
 
 // ── Fleet enum in the tool schema (first-turn agent-name mangle fix) ────────

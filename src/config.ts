@@ -33,9 +33,10 @@ export interface OrchestratorConfig {
 	/** Matchers for tools the orchestrator keeps while engaged. */
 	keepTools: string[];
 	/** Tool matchers blocked in every subagent (exact, glob, ext:<id>); always
-	 *  enforced two ways (ADR-0008): expanded parent-side to concrete tool names
-	 *  and unregistered via `--exclude-tools`, plus child-side via tool_call
-	 *  block (backstop for tools the parent's registry could not see). */
+	 *  enforced two ways (ADR-0008, ADR-0017): pi-accepted matchers (exact, *
+	 *  glob) pass through to `--exclude-tools` and the rest are expanded
+	 *  parent-side to concrete tool names, plus child-side via tool_call block
+	 *  (backstop for tools neither path covers). */
 	childBlockedTools: string[];
 	/** Extension sources (path, npm, or git — pi's repeatable `-e` flag) loaded
 	 *  in every child (ADR-0008). Derived semantics: non-empty spawns children

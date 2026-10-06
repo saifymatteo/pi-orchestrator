@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Blocked-tool matchers that pi's `--exclude-tools` accepts (exact names, `*` globs) now pass through verbatim to the child spawn flag (ADR-0017), so the child's own registry filters them — covering tools the parent's registry cannot see; `ext:<id>` and `?` matchers still expand parent-side, and the child-side gate remains the backstop
+- Require pi ≥ 1.0.4 (`@earendil-works/*` peer dependencies), the first version whose `--exclude-tools` accepts `*` patterns
+
+### Added
+
+- Agent frontmatter `tools` and `blockTools` now accept `*` patterns, passed to pi's `--tools`/`--exclude-tools` (pi ≥ 1.0.4); documented only — the values were already forwarded unmodified. Note: pi ≥ 1.0.4's `--tools` keeps MCP tools unless an entry starts with `mcp__`, so a restricted child gains MCP tools it did not have on older pi — add `mcp__*` to `tools` (or a `blockTools` entry) to keep them out
+
 ## [0.3.2] - 2026-09-30
 
 ### Fixed

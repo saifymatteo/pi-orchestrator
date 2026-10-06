@@ -8,7 +8,7 @@ This project is written entirely by GLM 5.3 Flash via the pi harness. It intenti
 
 ## Install
 
-Requires pi >= 0.84.0.
+Requires pi >= 1.0.4.
 
 From npm:
 
@@ -50,7 +50,7 @@ While engaged, the orchestrator parent runs on these layers:
 | Turn budget | soft-grace steer at the budget, hard kill at budget + 5 turns |
 | Stall watchdog | hard-kills a child silent for `stallTimeoutMs` (default 10 min); any output resets it |
 | Child mode | children self-disable this extension; a parent-PID heartbeat watchdog exits them if pi dies |
-| Child tool gate | children block tools matching `childBlockedTools` / per-agent `blockTools` at spawn (`--exclude-tools`) plus a child-side gate backstop |
+| Child tool gate | children block tools matching `childBlockedTools` / per-agent `blockTools` at spawn (`--exclude-tools`, pi ≥ 1.0.4 patterns) plus a child-side gate backstop |
 | UI | fleet widget above the editor: `⏳ Fleet · <mode> · N running` header plus one line per subagent (agent, turn, ctx load, tokens, task summary); idle line when nothing runs |
 
 Child success is state-based (the RPC `agent_settled` event); exit codes are informational only.
@@ -114,7 +114,7 @@ Discovered packages always appear read-only in `/orchestrator-tools`; availabili
 Tool matchers blocked in every subagent, same matcher semantics as `keepTools`. Empty or absent means nothing is blocked.
 
 - **Additive with per-agent `blockTools`**: the effective block list is the global matchers plus the agent's frontmatter matchers. The config is a floor: an agent can add blocks but never re-grant a globally blocked tool.
-- **Enforced twice**: matchers are expanded to concrete names (matchers that expand to nothing are skipped silently) and unregistered at spawn via `--exclude-tools`, so the child never sees them. On top of that, a child-side gate blocks any matching tool call with a visible reason (`Blocked by orchestrator policy: ...`), so the subagent can adapt instead of failing opaquely. The gate also covers tools the parent's registry could not see, e.g. when a per-task `cwd` loads extra project extensions: blocked tools stay visible but never execute.
+- **Enforced twice**: matchers pi's `--exclude-tools` accepts — exact names and `*` globs — are passed to it verbatim, so the child's own registry filters them (covering tools the parent's registry cannot see, e.g. when a per-task `cwd` loads extra project extensions); `ext:<id>` and `?` matchers are expanded against the parent's registry to concrete names first (matchers that expand to nothing are skipped silently there). On top of that, a child-side gate blocks any matching tool call with a visible reason (`Blocked by orchestrator policy: ...`), so the subagent can adapt instead of failing opaquely. The gate also covers case-mismatched or unseen tools the spawn-time pass misses: blocked tools stay visible but never execute.
 - **System-prompt hint**: when tools are blocked, the child's system prompt gets a `# Tool policy` section listing the matchers.
 - **Fail-soft**: the gate and hint run inside the child, so pi-orchestrator must load there too. Children inherit installed packages automatically; a user-level `~/.pi/agent` install keeps the gate always present. Without it, only the spawn-time unregistration applies.
 
@@ -215,8 +215,8 @@ Every agent is a markdown file: YAML frontmatter plus a body that becomes the ag
 |---|---|---|
 | `name` | string (required) | The name the orchestrator passes to `delegate` |
 | `description` | string (required) | Shown to the orchestrator in the delegation policy so it can pick the right agent |
-| `tools` | YAML list or comma-separated string | Restricts the child's toolset (e.g. `read, grep, find, ls`); omit for the full toolset |
-| `blockTools` | YAML list or comma-separated string | Tool matchers blocked for this agent (exact, glob, `ext:<id>`); **additive** with the global `childBlockedTools` floor: it can extend but never re-grant |
+| `tools` | YAML list or comma-separated string | Restricts the child's toolset (e.g. `read, grep, find, ls`); entries are tool names or `*` patterns passed to pi's `--tools` (pi ≥ 1.0.4); MCP tools stay available unless an entry starts with `mcp__` — add `mcp__*` to exclude them; omit for the full toolset |
+| `blockTools` | YAML list or comma-separated string | Tool matchers blocked for this agent (exact, `*` glob, `ext:<id>`); **additive** with the global `childBlockedTools` floor: it can extend but never re-grant |
 | `model` | string | `provider/model` for this agent; falls back to the dispatching session's model |
 | `thinking` | string | Thinking level for dispatches to this agent: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; invalid values are ignored (inherit) |
 | `hidden` | boolean | `true` excludes the agent from discovery |
