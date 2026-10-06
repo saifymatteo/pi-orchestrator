@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-06
+
 ### Changed
 
 - Blocked-tool matchers that pi's `--exclude-tools` accepts (exact names, `*` globs) now pass through verbatim to the child spawn flag (ADR-0017), so the child's own registry filters them — covering tools the parent's registry cannot see; `ext:<id>` and `?` matchers still expand parent-side, and the child-side gate remains the backstop
@@ -139,6 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - First version of the project: orchestrator extension for pi with fleet delegation, unit tests, ADRs, and npm packaging
 
+[0.4.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.2...v0.4.0
 [0.3.1]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.0...v0.3.1
 [0.3.2]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.1...v0.3.2
 [0.3.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.2.2...v0.3.0
