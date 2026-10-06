@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-06
+
 ### Changed
 
 - README: new "Match custom and local extensions" section explains how `ext:<id>` is derived from a tool's `sourceInfo` path (package name under `node_modules`, otherwise the entry file's name), why settings.json `extensions` entries like hindsight's `dist/pi.js` must be matched by tool-name glob (`hindsight_*`, not `ext:hindsight`), and a goal-by-goal table for keeping/blocking a tool on the parent vs. children
@@ -151,6 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - First version of the project: orchestrator extension for pi with fleet delegation, unit tests, ADRs, and npm packaging
 
+[0.5.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.2...v0.4.0
 [0.3.1]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.0...v0.3.1
 [0.3.2]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.1...v0.3.2
