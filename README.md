@@ -1,6 +1,6 @@
 # pi-orchestrator
 
-A pi extension that turns the main agent into an orchestrator: its tools are reduced to a configurable allow-list, and its only path to real work is the `delegate` tool, which spawns subagent workers with isolated contexts and full capabilities.
+A pi extension that turns the main agent into an orchestrator: while engaged, the orchestrator's toolset shrinks to a configurable allow-list, and the `delegate` tool becomes its only path to real work, spawning subagent workers with isolated contexts and full capabilities.
 
 ## Disclaimer
 
@@ -31,7 +31,7 @@ From a local clone, add the path to `packages` in `~/.pi/agent/settings.json`:
 ]
 ```
 
-For a quick test without installing:
+To test without installing:
 
 ```bash
 pi -e <path-to-your-clone>/pi-orchestrator/src/index.ts
@@ -53,7 +53,7 @@ While engaged, the orchestrator parent runs on these layers:
 | Child tool gate | children block tools matching `childBlockedTools` / per-agent `blockTools` at spawn (`--exclude-tools`, pi ≥ 1.0.4 patterns) plus a child-side gate backstop |
 | UI | fleet widget above the editor: `⏳ Fleet · <mode> · N running` header plus one line per subagent (agent, turn, ctx load, tokens, task summary); idle line when nothing runs |
 
-Child success is state-based (the RPC `agent_settled` event); exit codes are informational only.
+pi-orchestrator tracks child success through the RPC `agent_settled` event; exit codes are informational only.
 
 **Dispatch modes.** Dispatch is async by default: single and parallel dispatches (`tasks[]`, max 8, concurrency 4) return run ids immediately, and each settled result is pushed into the conversation automatically, so the orchestrator never polls and stays free to talk with you or dispatch more work mid-flight. Pass `async: false` to block until the final result. Chains are always blocking because each step consumes the prior result. These control and discovery shapes never spawn anything:
 
@@ -114,7 +114,7 @@ Discovered packages always appear read-only in `/orchestrator-tools`; availabili
 Tool matchers blocked in every subagent, same matcher semantics as `keepTools`. Empty or absent means nothing is blocked.
 
 - **Additive with per-agent `blockTools`**: the effective block list is the global matchers plus the agent's frontmatter matchers. The config is a floor: an agent can add blocks but never re-grant a globally blocked tool.
-- **Enforced twice**: matchers pi's `--exclude-tools` accepts — exact names and `*` globs — are passed to it verbatim, so the child's own registry filters them (covering tools the parent's registry cannot see, e.g. when a per-task `cwd` loads extra project extensions); `ext:<id>` and `?` matchers are expanded against the parent's registry to concrete names first (matchers that expand to nothing are skipped silently there). On top of that, a child-side gate blocks any matching tool call with a visible reason (`Blocked by orchestrator policy: ...`), so the subagent can adapt instead of failing opaquely. The gate also covers case-mismatched or unseen tools the spawn-time pass misses: blocked tools stay visible but never execute.
+- **Enforced twice**: matchers pi's `--exclude-tools` accepts (exact names and `*` globs) pass through to it verbatim, so the child's own registry filters them (covering tools the parent's registry cannot see, e.g. when a per-task `cwd` loads extra project extensions); `ext:<id>` and `?` matchers expand against the parent's registry to concrete names first (matchers that expand to nothing are skipped silently there). On top of that, a child-side gate blocks any matching tool call with a visible reason (`Blocked by orchestrator policy: …`), so the subagent can adapt instead of failing opaquely. The gate also covers case-mismatched or unseen tools the spawn-time pass misses: blocked tools stay visible but never execute.
 - **System-prompt hint**: when tools are blocked, the child's system prompt gets a `# Tool policy` section listing the matchers.
 - **Fail-soft**: the gate and hint run inside the child, so pi-orchestrator must load there too. Children inherit installed packages automatically; a user-level `~/.pi/agent` install keeps the gate always present. Without it, only the spawn-time unregistration applies.
 
@@ -145,7 +145,7 @@ The strip only fires on byte-identical matches, so a per-task `cwd` override kee
 
 When `true`, every subagent keeps a persistent pi session instead of running ephemeral: the child spawns without `--no-session` and with `--session-dir` pointing at the parent's session directory, and the parent links it via RPC `new_session {parentSession}` before the task prompt. The session is named `orch: <agent> — <task-summary>` so it's findable in `/resume` (filter named sessions with Ctrl+N).
 
-- Every `delegate` result ends with `Subagent session: <path>`: the full transcript on disk (task, tool calls, readings), not just the returned summary.
+- Every `delegate` result ends with `Subagent session: <path>`: the full transcript on disk (task, tool calls, readings), not the returned summary alone.
 - The transcript survives normal completion, turn-budget kill, stall kill, aborts, and parent death. Partial work from a killed child stays inspectable.
 - `delegate({action: "sessions"})` lists the current parent session's sub-sessions (newest first), derived from on-disk headers, so it works after restarts and resumes.
 - Sessions are file-per-run: two concurrent runs of the same agent never share a JSONL. The deterministic per-(agent, model) id is only used for ephemeral runs, where it stabilizes the OpenAI-compat `prompt_cache_key`. Sessions are created lazily: a child killed before its first message leaves no file.
@@ -165,7 +165,7 @@ Include the fleet shipped with the extension: **scout** (read-only recon), **pla
 
 - `true` (default): every builtin is included. `false`: none are.
 - Object form overrides per builtin, keyed by agent name, reusing agent-frontmatter fields:
-  - `"hidden": true` excludes the builtin from the fleet — filtered before the name-merge, so a user/project agent of the same name still works.
+  - `"hidden": true` excludes the builtin from the fleet, filtered before the name-merge, so a user/project agent of the same name still works.
   - `"thinking"` sets the builtin's thinking level (see [Thinking levels](#thinking-levels)), overriding its shipped frontmatter: config outranks what you cannot edit.
   - Builtins not listed stay included with no explicit level; entries for unknown names are inert.
 
@@ -180,12 +180,12 @@ Include the fleet shipped with the extension: **scout** (read-only recon), **pla
 
 ### Thinking levels
 
-The reasoning effort a subagent runs with: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. An explicit level is independent of the model — it applies even to an agent with a pinned `model` (an unsupported model/level combination passes through to pi, which errors or clamps).
+The reasoning effort a subagent runs with: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. An explicit level is independent of the model: it applies even to an agent with a pinned `model` (an unsupported model/level combination passes through to pi, which errors or clamps).
 
 Set it in agent frontmatter (`thinking: high`) or, for builtins only, in the `builtinFleet` map. Precedence:
 
-1. Explicit level — for a **builtin**, the `builtinFleet` entry beats its shipped frontmatter; for a **user/project** agent, the frontmatter `thinking` is the only source.
-2. No explicit level: the dispatching session's live thinking level is inherited — but only by agents without a pinned `model`.
+1. Explicit level: for a **builtin**, the `builtinFleet` entry beats its shipped frontmatter; for a **user/project** agent, the frontmatter `thinking` is the only source.
+2. No explicit level: the dispatching session's live thinking level is inherited, but only by agents without a pinned `model`.
 3. Otherwise pi's per-model default applies.
 
 An invalid value warns once and falls back to inheritance. The shipped fleet comes tuned: scout `low`, planner `high`, worker `medium`, reviewer `high`.
@@ -207,6 +207,33 @@ Values must be positive integers: strings, floats, zero, and negatives fall back
 
 Wall-clock stall watchdog: any line a child writes to stdout resets the timer, and a child silent for this long is hard-killed and reported as failed with a `stall-timeout` reason, preserving output produced so far. There is no disable switch: to effectively disable it, set a huge value.
 
+## Match custom and local extensions
+
+Matcher semantics never read `settings.json` or any install manifest: pi-orchestrator derives each tool's extension id at runtime from the `sourceInfo` path of the registered tool. `ext:<id>` therefore works for extensions loaded from any source, but the id is not always the product name you expect.
+
+The derivation rules:
+
+- **Package source**: a path under `node_modules` yields the package name, scope included: `~/.pi/agent/npm/node_modules/@plannotator/pi-extension/dist/index.js` → `@plannotator/pi-extension`.
+- **File source**: any other path yields the filename without extension: `~/.pi/agent/extensions/bg-bash.ts` → `bg-bash`.
+
+Two consequences worth checking against your own installs:
+
+- **The entry file's name decides the id.** An `extensions` entry in `settings.json` such as `~/.hindsight/coding-agents/dist/pi.js` derives the id `pi`, not `hindsight`: `ext:hindsight` matches nothing, and `ext:pi` would match every tool that file registers. Match by tool-name glob instead (`hindsight_*`).
+- **Builtin replacements keep their own id.** An extension that re-registers a builtin (bg-bash, for example, replaces `bash` and `powershell`) is reachable only through `ext:<id>` (`ext:bg-bash`); a bare `bash` matcher targets the tool name, whichever implementation registered it.
+
+Common goals and the config that expresses each:
+
+| Goal | Parent (main agent) | Children |
+|---|---|---|
+| Keep for parent, block for children | add the matcher to `keepTools` | add the same matcher to `childBlockedTools` |
+| Block for parent, keep for children | omit it from `keepTools` | leave it out of `childBlockedTools` |
+| Keep everywhere | add to `keepTools` | leave `childBlockedTools` alone |
+| Block everywhere | omit from `keepTools` | add to `childBlockedTools` |
+
+The parent column applies while orchestration is engaged: `keepTools` is an allow-list, so anything not listed is unavailable, and a disengaged session (via `/orchestrator`) exposes all tools again. The child column applies on every `delegate` spawn regardless of engagement. To exclude an extension's code from children entirely, not just its tools, see [Child extension control](#child-extension-control).
+
+To find the id a tool actually derives, run `/orchestrator-tools`: every discovered extension appears read-only as `ext:<id>` with the tool names it registered.
+
 ## Agent definitions
 
 Every agent is a markdown file: YAML frontmatter plus a body that becomes the agent's system prompt.
@@ -215,7 +242,7 @@ Every agent is a markdown file: YAML frontmatter plus a body that becomes the ag
 |---|---|---|
 | `name` | string (required) | The name the orchestrator passes to `delegate` |
 | `description` | string (required) | Shown to the orchestrator in the delegation policy so it can pick the right agent |
-| `tools` | YAML list or comma-separated string | Restricts the child's toolset (e.g. `read, grep, find, ls`); entries are tool names or `*` patterns passed to pi's `--tools` (pi ≥ 1.0.4); MCP tools stay available unless an entry starts with `mcp__` — add `mcp__*` to exclude them; omit for the full toolset |
+| `tools` | YAML list or comma-separated string | Restricts the child's toolset (e.g. `read, grep, find, ls`); entries are tool names or `*` patterns passed to pi's `--tools` (pi ≥ 1.0.4); MCP tools stay available unless an entry starts with `mcp__`; add `mcp__*` to exclude them; omit for the full toolset |
 | `blockTools` | YAML list or comma-separated string | Tool matchers blocked for this agent (exact, `*` glob, `ext:<id>`); **additive** with the global `childBlockedTools` floor: it can extend but never re-grant |
 | `model` | string | `provider/model` for this agent; falls back to the dispatching session's model |
 | `thinking` | string | Thinking level for dispatches to this agent: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; invalid values are ignored (inherit) |
@@ -225,15 +252,15 @@ Every agent is a markdown file: YAML frontmatter plus a body that becomes the ag
 ```markdown
 ---
 name: scout
-description: "Fast recon for delegated lookups — find where X lives, how X works, what state Y is in, or gather facts before planning. Returns compressed findings with file:line citations."
+description: "Fast recon for delegated lookups: find where X lives, how X works, what state Y is in, or gather facts before planning. Returns compressed findings with file:line citations."
 tools: read, grep, find, ls
 maxTurns: 20
 ---
 
-You are scout working in an isolated context. ...
+You are scout working in an isolated context. …
 ```
 
-Files with a missing or non-string `name` or `description` are skipped. An invalid `maxTurns` is ignored and falls back to the config default; an invalid `thinking` is ignored and falls back to inheritance.
+pi-orchestrator skips files with a missing or non-string `name` or `description`. An invalid `maxTurns` falls back to the config default; an invalid `thinking` falls back to inheritance.
 
 ## Agent discovery
 
@@ -272,15 +299,15 @@ Children inherit installed extensions automatically and run headless: a dangerou
 
 ## Policy and fleet text
 
-The delegation policy is computed once per engagement from what is actually installed, then reused verbatim every turn: the allow-list names the tools retained at compute time, the fleet section lists the agents discovered at that point, and the typical-flows example is composed from the discovered names. The text is regenerated when engagement turns on again (session start with `enabled: true`, or `/orchestrator` re-engage). Mid-session agent additions are covered by the delegate tool's `list` action and the schema enum, not by prompt rewrites. Nothing about other packages is hardcoded, so two installs with different packages produce slightly different policy text, and `builtinFleet: false`, `hidden: true`, and project agents all change what it says.
+pi-orchestrator computes the delegation policy once per engagement from what is actually installed and reuses it verbatim every turn: the allow-list names the tools retained at compute time, the fleet section lists the agents discovered at that point, and the typical-flows example is composed from the discovered names. The text is regenerated when engagement turns on again (session start with `enabled: true`, or `/orchestrator` re-engage). Mid-session agent additions are covered by the delegate tool's `list` action and the schema enum, not by prompt rewrites. Nothing about other packages is hardcoded, so two installs with different packages produce slightly different policy text, and `builtinFleet: false`, `hidden: true`, and project agents all change what it says.
 
 ## Files
 
-- `src/index.ts` — entry: child watchdog, engagement, reduction, gate, commands
-- `src/config.ts` — orchestrator.jsonc (JSONC, comment-preserving writes), keep-list matchers, runtime tool discovery
-- `src/width.ts` — visible-width helpers (ANSI-aware truncation for TUI rendering)
-- `src/agents.ts` — fleet discovery (builtin, user, project tree)
-- `src/policy.ts` — delegation policy text generated from fleet + kept tools
-- `src/delegate.ts` — the delegate tool: RPC child spawning, turn budget, stall watchdog, progress streaming, renderers, reaping
-- `agents/*.md` — builtin fleet definitions
-- `docs/adr/` — decision records
+- `src/index.ts` handles the child watchdog, engagement, reduction, gate, and commands
+- `src/config.ts` implements orchestrator.jsonc (JSONC, comment-preserving writes), keep-list matchers, and runtime tool discovery
+- `src/width.ts` provides ANSI-aware visible-width helpers for TUI rendering
+- `src/agents.ts` discovers the fleet (builtin, user, project tree)
+- `src/policy.ts` generates the delegation policy text from fleet and kept tools
+- `src/delegate.ts` implements the delegate tool: RPC child spawning, turn budget, stall watchdog, progress streaming, renderers, reaping
+- `agents/*.md` holds the builtin fleet definitions
+- `docs/adr/` collects the decision records

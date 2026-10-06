@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- README: new "Match custom and local extensions" section explains how `ext:<id>` is derived from a tool's `sourceInfo` path (package name under `node_modules`, otherwise the entry file's name), why settings.json `extensions` entries like hindsight's `dist/pi.js` must be matched by tool-name glob (`hindsight_*`, not `ext:hindsight`), and a goal-by-goal table for keeping/blocking a tool on the parent vs. children
 - Engaged-mode policy text audited and de-duplicated: async-delivery semantics stated once (intro rule) instead of three times, allow-list folded into the intro sentence, single-agent flow line trimmed to the live half, vague rule-3 clause dropped; ~1 in 7 tokens off every engaged turn
 - Trim the delegate tool description and async acceptance text (model-facing context): modes/actions/escape-hatch restatements removed (they live in the parameter schema), the "only way to read/write" line removed (it duplicates the engaged-mode policy text and is false in AUTO mode), and the no-poll boilerplate compressed
 - Delivered background subagent results now render like bg-bash's finished-job rows: a single capped ✓/✗ status line on the purple `customMessage` background with output padding, click- or ctrl+o-expandable to the full delivered text
