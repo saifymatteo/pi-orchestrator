@@ -384,7 +384,7 @@ test("buildPolicy: deterministic for identical inputs (ADR-0013 cache premise)",
 		},
 	];
 	const kept: DiscoveredTool[] = [{ extensionId: "ext:x", names: ["read"], partial: false }];
-	assert.equal(buildPolicy(agents, DEFAULT_CONFIG, kept), buildPolicy(agents, DEFAULT_CONFIG, kept));
+	assert.equal(buildPolicy(agents, kept), buildPolicy(agents, kept));
 });
 
 // ── AUTO toolset hands-off (clarified contract) ─────────────────────────────

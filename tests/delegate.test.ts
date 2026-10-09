@@ -593,7 +593,7 @@ test("resolveChildExcludeTools: empty matchers ⇒ []", () => {
 
 // ── Fleet enum in the tool schema (first-turn agent-name mangle fix) ────────
 
-import { agentNameParam, buildDelegateParams } from "../src/delegate.ts";
+import { agentNameParam, buildDelegateParams, buildDelegatePromptGuidelines } from "../src/delegate.ts";
 
 const FLEET = ["planner", "reviewer", "scout", "worker"];
 
@@ -1212,6 +1212,23 @@ test("buildDelegateParams: async description reflects the configured default (AD
 	const blockingSchema = (buildDelegateParams(["scout"], false).properties as any).async;
 	assert.match(asyncSchema.description, /default true/);
 	assert.match(blockingSchema.description, /default false/);
+});
+
+test("promptGuidelines: mode-invariant, no config-derived or engaged-only text (ADR-0018)", () => {
+	const guidelines = buildDelegatePromptGuidelines();
+	assert.ok(guidelines.length > 0);
+	const text = guidelines.join("\n");
+	// Engaged-only concepts must never reach the always-on guidelines, or
+	// AUTO mode would be instructed as if it were an orchestrator.
+	assert.doesNotMatch(text, /orchestrator|allow-list|fleet/i);
+	// The dispatch default lives in the description and the `async` schema —
+	// the guidelines must not restate it or vary with the config (cache-prefix
+	// stability), so no `async` and no `by default` wording.
+	assert.doesNotMatch(text, /\basync\b|by default|default (true|false)/i);
+	assert.ok(guidelines.every((g) => g.length > 0 && g === g.trim()));
+	assert.equal(new Set(guidelines).size, guidelines.length, "no duplicate guidelines");
+	// Registration wiring: the definition pi receives carries the guidelines.
+	assert.deepEqual(delegateTool.promptGuidelines, guidelines);
 });
 
 test("chain + async:true is a validation error naming chain as always-blocking", async () => {

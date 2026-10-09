@@ -1884,6 +1884,31 @@ function formatAgentListing(a: AgentConfig): string {
 	return `- **${a.name}** (${attrs.join(", ")}): ${a.description}`;
 }
 
+/**
+ * Mode-invariant delegate usage guidance, contributed as the tool's
+ * `promptGuidelines` so pi injects it into the system prompt's <rules>
+ * section whenever `delegate` is active — i.e. in BOTH AUTO and engaged mode
+ * (ADR-0018). This is what makes AUTO mode reach for the tool without a
+ * delegation policy; engaged-only content (allow-list, fleet, the file-work
+ * mandate) stays in the policy.
+ *
+ * No config-derived text: the dispatch default is stated by the tool
+ * description and the `async` parameter schema (ADR-0016), so the guidance
+ * here is a pure function of nothing and the <rules> section is byte-stable
+ * across config changes — it adds no prompt-cache-invalidating variance and
+ * restates neither site. Exported for unit tests.
+ */
+export function buildDelegatePromptGuidelines(): string[] {
+	return [
+		"Reach for `delegate` when work is broad, context-heavy, parallelizable, or benefits from an isolated context.",
+		"Choose the mode that fits the work: `{agent, task}` for a single job, `tasks[]` for independent parallel work, `chain[]` with the `{previous}` placeholder for dependent steps (always blocking).",
+		"Delegate task prompts must be self-contained: the subagent cannot see this conversation — include paths, constraints, and the exact expected output.",
+		"Report subagent results to the user in your own words — never paste raw subagent output.",
+		"Delegation is one level deep: subagents cannot delegate further.",
+		"When a task is ambiguous, clarify with the user before dispatching.",
+	];
+}
+
 export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 	// The fleet enum lives in the schema, not just the prose: the model
 	// generates against the tool schema, so listing real names there is what
@@ -2074,6 +2099,7 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 				: "Dispatch blocks by default (orchestrator.jsonc async: false): the call returns the subagent's final result directly. ") +
 			"Agent names are exact fleet names — when unsure, list first. " +
 			"Each dispatch returns a Subagent session path (the subagent's persistent pi transcript) you can hand to another subagent for a deeper look.",
+		promptGuidelines: buildDelegatePromptGuidelines(),
 		parameters: buildDelegateParams(fleetNames, asyncDefault),
 
 		async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {

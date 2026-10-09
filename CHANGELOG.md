@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Mode-invariant delegate usage guidance (when to reach for the tool, mode selection, self-contained task prompts, result reporting, one-level-deep) is now contributed as the `delegate` tool's `promptGuidelines`, so it lands in the system-prompt rules section in **both** AUTO and engaged mode — AUTO sessions no longer rely on the tool description alone to reach for the tool. The guidelines carry no config-derived text (the dispatch default stays in the tool description and schema), so the rules section is stable across config changes; the delegation policy keeps only engaged-only content, removing the previous duplication (ADR-0018)
+
 ## [0.5.0] - 2026-10-06
 
 ### Changed

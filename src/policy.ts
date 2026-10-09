@@ -1,6 +1,13 @@
 /**
- * Delegation policy appended to the system prompt on every turn while
- * orchestration is engaged (ADR-0001).
+ * Engaged-only delegation policy appended to the system prompt on every turn
+ * while orchestration is engaged (ADR-0001).
+ *
+ * Scope split (ADR-0018): mode-invariant delegate usage guidance lives in the
+ * delegate tool's `promptGuidelines` (src/delegate.ts), so it reaches the
+ * system prompt's <rules> section in BOTH AUTO and engaged mode. This policy
+ * carries only what is true while engaged: the orchestrator role, the
+ * allow-list, the fleet, and the file-work mandate. Nothing here restates the
+ * tool's guidelines.
  *
  * The TEXT is computed once per engagement episode and cached (ADR-0013):
  * pi rebuilds the system prompt each turn, so the append must stay
@@ -11,9 +18,9 @@
  */
 
 import type { AgentConfig } from "./agents.ts";
-import type { DiscoveredTool, OrchestratorConfig } from "./config.ts";
+import type { DiscoveredTool } from "./config.ts";
 
-export function buildPolicy(agents: AgentConfig[], config: OrchestratorConfig, keptTools: DiscoveredTool[]): string {
+export function buildPolicy(agents: AgentConfig[], keptTools: DiscoveredTool[]): string {
 	const fleet = agents
 		.map((a) => `- **${a.name}**${a.tools ? ` (tools: ${a.tools.join(", ")})` : " (full tools)"}: ${a.description}`)
 		.join("\n");
@@ -25,18 +32,6 @@ export function buildPolicy(agents: AgentConfig[], config: OrchestratorConfig, k
 			: "`delegate` is your only direct tool.";
 
 	const names = agents.map((a) => a.name);
-	// Dispatch-mode wording (ADR-0016): the config default must match what the
-	// delegate tool actually does, or the model reads contradictory instructions
-	// every turn. Under a blocking default the escape hatch is `{async: true}`.
-	const dispatchIntro = config.async
-		? "Dispatch is async by default — you get an acceptance immediately, and each subagent's settled result is delivered into this conversation automatically."
-		: "Dispatch blocks by default — a delegate call returns the subagent's final result directly. Pass `{async: true}` to fire-and-forget: you get an acceptance immediately, and the settled result is delivered into this conversation automatically.";
-	const modeRule = config.async
-		? "4. Choose the mode that fits the work: `{agent, task}` for a single job, `tasks[]` for independent parallel work, `chain[]` with the `{previous}` placeholder for dependent steps (always blocking), or `{async: false}` to block for a quick single job."
-		: "4. Choose the mode that fits the work: `{agent, task}` for a single job, `tasks[]` for independent parallel work, `chain[]` with the `{previous}` placeholder for dependent steps (always blocking). Dispatches block until the final result; pass `{async: true}` to fire-and-forget when you want to keep working while a run settles.";
-	const noPollRule = config.async
-		? "5. After dispatching, do not poll: settled results arrive on their own — dispatch more work, respond to the user, or end your turn. `{action: \"status\"}` lists live runs; `{action: \"cancel\", runId}` stops one."
-		: "5. After a fire-and-forget dispatch (`{async: true}`), do not poll: settled results arrive on their own — dispatch more work, respond to the user, or end your turn. `{action: \"status\"}` lists live runs; `{action: \"cancel\", runId}` stops one.";
 	const flowLines: string[] = [];
 	if (names.length === 1) {
 		flowLines.push(`   - Split large tasks into several delegate calls to \`${names[0]}\` (parallel via \`tasks[]\`).`);
@@ -52,7 +47,7 @@ export function buildPolicy(agents: AgentConfig[], config: OrchestratorConfig, k
 	return `
 ## Orchestrator Mode (pi-orchestrator)
 
-You are running as an ORCHESTRATOR: your toolset is the allow-list below, and the \`delegate\` tool is your path to real work — it spawns subagents with isolated contexts and the full toolset. ${dispatchIntro}
+You are running as an ORCHESTRATOR: your toolset is the allow-list below, and the \`delegate\` tool is your path to real work — it spawns subagents with isolated contexts and the full toolset.
 
 ### Allow-list
 
@@ -68,11 +63,5 @@ ${flows}
 
 1. Any task involving reading, searching, writing, editing files, or running commands goes through \`delegate\`. Never say you cannot do something — delegate it.
 2. Purely conversational replies (greetings, definitions, questions about this conversation, quick facts you already know) may be answered directly without delegating.
-3. When a task is ambiguous, clarify with the user before delegating.
-${modeRule}
-${noPollRule}
-6. Task prompts must be self-contained: subagents cannot see this conversation. Include paths, constraints, and the exact expected output.
-7. Report subagent results to the user in your own words — never paste raw subagent output.
-8. Orchestration is flat: subagents cannot delegate further. Plan one level deep.
 `.trim();
 }

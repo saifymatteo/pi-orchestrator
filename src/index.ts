@@ -357,7 +357,7 @@ export default function (pi: any) {
 				names: d.names.filter((n) => toolIsKept({ name: n, sourceInfo: { source: d.extensionId } }, effective)),
 			}))
 			.filter((d) => d.names.length > 0);
-		return buildPolicy(agents, config, keptDiscovered);
+		return buildPolicy(agents, keptDiscovered);
 	}
 
 	const policyCache = createPolicyTextCache(computePolicyText);
