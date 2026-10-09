@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-09
+
 ### Added
 
 - Mode-invariant delegate usage guidance (when to reach for the tool, mode selection, self-contained task prompts, result reporting, one-level-deep) is now contributed as the `delegate` tool's `promptGuidelines`, so it lands in the system-prompt rules section in **both** AUTO and engaged mode — AUTO sessions no longer rely on the tool description alone to reach for the tool. The guidelines carry no config-derived text (the dispatch default stays in the tool description and schema), so the rules section is stable across config changes; the delegation policy keeps only engaged-only content, removing the previous duplication (ADR-0018)
@@ -157,6 +159,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - First version of the project: orchestrator extension for pi with fleet delegation, unit tests, ADRs, and npm packaging
 
+[0.6.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.2...v0.4.0
 [0.3.1]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.0...v0.3.1
