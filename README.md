@@ -70,29 +70,36 @@ Design decisions live in the architecture decision records under `docs/adr/`.
 
 ## Config: `~/.pi/agent/orchestrator.jsonc`
 
-The config is JSONC: comments next to any key survive every save, because the extension edits only the keys it changes through `jsonc-parser`'s comment-preserving modify API. A legacy `orchestrator.json` is still read; the first save writes `orchestrator.jsonc` and removes the old file. Copy the example below and delete the keys you don't need: every key is optional and falls back to its default when absent.
+The config is JSONC: comments next to any key survive every save, because the extension edits only the keys it changes through `jsonc-parser`'s comment-preserving modify API. A legacy `orchestrator.json` is still read; the first save writes `orchestrator.jsonc` before removing the old file. Every setting is optional; `{}` is valid and uses the runtime defaults.
+
+### Editor assistance and field reference
+
+The [configuration schema](schemas/orchestrator.schema.json) owns the exhaustive field types, defaults, constraints, descriptions, and examples, authored in the shared [definition](src/config-schema.ts). The concepts and recipes below explain how to use those settings together. This schema covers only `orchestrator.jsonc` and legacy `orchestrator.json`, not pi settings or agent frontmatter.
+
+A standard `$schema` reference enables completion, hover documentation, and strict unknown-key diagnostics in schema-capable JSON/JSONC editors. For example, this recipe keeps a memory tool available to the parent but blocks it in children:
 
 ```jsonc
 {
-  "enabled": true, // orchestration engaged by default (/orchestrator toggles)
-  "keepTools": ["delegate"], // tools the orchestrator keeps while engaged: exact name, "glob_*", or "ext:<extension-id>"
-  "childBlockedTools": [], // tools blocked in every subagent, e.g. ["bash", "hindsight_*"]
-  "childExtensions": [], // extension sources loaded in every child (path, npm, or git)
-  "forwardParentPrompt": true, // append the orchestrator parent's system prompt to every subagent
-  "childSessions": true, // persistent sub-sessions, listed via delegate({action: "sessions"})
-  "async": true, // delegate dispatches return an acceptance immediately; false = block for the final result
-  "builtinFleet": true, // built-in fleet: true/false, or per-agent overrides: { "worker": { "hidden": true, "thinking": "xhigh" } }
-  "modelOverrides": {}, // pin a model per agent, e.g. { "scout": "openrouter/some-cheap-model" }
-  "maxTurns": 50, // per-subagent turn budget
-  "stallTimeoutMs": 600000 // hard-kill a child silent for this long (600000 = 10 min)
+  // Replace <installed-version> with a released version that includes the schema.
+  "$schema": "https://cdn.jsdelivr.net/npm/@saifymatteo/pi-orchestrator@<installed-version>/schemas/orchestrator.schema.json",
+  "keepTools": ["delegate", "hindsight_*"],
+  "childBlockedTools": ["hindsight_*"]
 }
 ```
 
-### `enabled` (boolean, default `true`)
+**Unreleased feature:** package version `0.6.0` predates the schema; its public schema URL does not work. The placeholder above is not a working URL: the first schema-bearing release must publish `schemas/orchestrator.schema.json` before its pinned URL can resolve. In a development checkout, use a local reference instead, such as `"$schema": "../schemas/orchestrator.schema.json"` for a config one directory below the checkout root. Adjust the relative path from your config's directory to the checkout's schema; the same path will not generally work in `~/.pi/agent/`.
 
-Orchestration engaged by default. `/orchestrator` toggles it and persists the new value here.
+Editor diagnostics are **not runtime validation**. Unknown setting names (including typos such as `maxTurn`) are flagged in the editor but remain ignored by the loader and preserved on save. Invalid values such as `maxTurns: 0` get editor diagnostics while retaining the existing runtime fallback behavior. Supported agent-name maps allow arbitrary names; their values and known nested fields are still checked by the editor. Schema `default` annotations document defaults, not instructions to insert them into your file. `$schema` is metadata, not a runtime option.
 
-### `keepTools` (string[], default `["delegate"]`)
+Normal configuration saves (for example, `/orchestrator`) add a missing `$schema` reference or refresh a recognized extension-owned reference to the installed version's pinned URL. Custom schema URLs and comments are preserved, including during legacy-file migration. Existing configs get a reference on their next normal save, or you can add one manually. **Loading never writes files or fetches schemas.** Your editor may fetch or cache the schema; an offline editor or unavailable CDN affects assistance only, not runtime loading. For an unreleased checkout, use the local reference above even if a save inserted a not-yet-published version URL.
+
+See [ADR-0019](docs/adr/0019-config-json-schema.md) for the editor/runtime boundary and publishing decision.
+
+### Engagement and parent tool access
+
+Orchestration starts engaged unless configured otherwise with `enabled`. `/orchestrator` toggles it and persists the new value here.
+
+`keepTools` controls the engaged parent's tool access.
 
 Matchers for tools the orchestrator keeps while engaged, all case-insensitive:
 
@@ -109,27 +116,27 @@ Discovered packages always appear read-only in `/orchestrator-tools`; availabili
 
 **Builtin-shadowing:** extensions that re-register a builtin tool name (`read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`) are excluded from auto-keep unless explicitly listed as `ext:<id>`. Registration replaces the builtin wholesale, so auto-keeping the shadow would resurrect a core tool the config never listed. An explicit `ext:<id>` entry re-enables the whole extension.
 
-### `childBlockedTools` (string[], default `[]`)
+### Child tool policy
 
-Tool matchers blocked in every subagent, same matcher semantics as `keepTools`. Empty or absent means nothing is blocked.
+`childBlockedTools` blocks tool matchers in every subagent, using the same matcher semantics as `keepTools`. Empty or absent means nothing is blocked.
 
 - **Additive with per-agent `blockTools`**: the effective block list is the global matchers plus the agent's frontmatter matchers. The config is a floor: an agent can add blocks but never re-grant a globally blocked tool.
 - **Enforced twice**: matchers pi's `--exclude-tools` accepts (exact names and `*` globs) pass through to it verbatim, so the child's own registry filters them (covering tools the parent's registry cannot see, e.g. when a per-task `cwd` loads extra project extensions); `ext:<id>` and `?` matchers expand against the parent's registry to concrete names first (matchers that expand to nothing are skipped silently there). On top of that, a child-side gate blocks any matching tool call with a visible reason (`Blocked by orchestrator policy: …`), so the subagent can adapt instead of failing opaquely. The gate also covers case-mismatched or unseen tools the spawn-time pass misses: blocked tools stay visible but never execute.
 - **System-prompt hint**: when tools are blocked, the child's system prompt gets a `# Tool policy` section listing the matchers.
 - **Fail-soft**: the gate and hint run inside the child, so pi-orchestrator must load there too. Children inherit installed packages automatically; a user-level `~/.pi/agent` install keeps the gate always present. Without it, only the spawn-time unregistration applies.
 
-### `childExtensions` (string[], default `[]`)
+### Selective child extensions
 
-Extension sources loaded in every child: a path, npm, or git source.
+Use `childExtensions` to choose extension sources loaded in every child: a path, npm, or git source.
 
 - **Empty (default)**: children inherit all discovered extensions, as pi's own discovery provides.
 - **Non-empty**: children spawn with `--no-extensions` and load only these entries via pi's repeatable `-e` flag.
 
 To keep the child-side tool gate and orphan watchdog alive in isolated children, add this package itself to the list, e.g. `["npm:@saifymatteo/pi-orchestrator"]`. See [Child extension control](#child-extension-control).
 
-### `forwardParentPrompt` (boolean, default `true`)
+### Parent prompt forwarding
 
-When `true`, every subagent gets the parent's pre-policy system prompt appended at the end of its own. The parent writes the prompt to a temp file and passes the path via `PI_ORCHESTRATOR_PARENT_PROMPT_FILE`; a child-side hook appends it last, after pi's base prompt, the agent body, project context, skills, and cwd.
+With `forwardParentPrompt: true`, every subagent gets the parent's pre-policy system prompt appended at the end of its own. The parent writes the prompt to a temp file and passes the path via `PI_ORCHESTRATOR_PARENT_PROMPT_FILE`; a child-side hook appends it last, after pi's base prompt, the agent body, project context, skills, and cwd.
 
 This ordering maximizes the stable shared prefix across children, which improves provider prompt-cache hit rates: only the task-specific tail differs. The appended prompt also carries installed extensions' prompt guidelines (e.g. CodeGraph's tool usage guidance) into subagents.
 
@@ -141,9 +148,9 @@ Before appending, the hook strips segments the child already receives verbatim, 
 
 The strip only fires on byte-identical matches, so a per-task `cwd` override keeps the forwarded copy intact. Set to `false` to keep subagent prompts minimal: agent body plus tool-policy hint, no file, no env var.
 
-### `childSessions` (boolean, default `true`)
+### Persistent child transcripts
 
-When `true`, every subagent keeps a persistent pi session instead of running ephemeral: the child spawns without `--no-session` and with `--session-dir` pointing at the parent's session directory, and the parent links it via RPC `new_session {parentSession}` before the task prompt. The session is named `orch: <agent> — <task-summary>` so it's findable in `/resume` (filter named sessions with Ctrl+N).
+With `childSessions: true`, every subagent keeps a persistent pi session instead of running ephemeral: the child spawns without `--no-session` and with `--session-dir` pointing at the parent's session directory, and the parent links it via RPC `new_session {parentSession}` before the task prompt. The session is named `orch: <agent> — <task-summary>` so it's findable in `/resume` (filter named sessions with Ctrl+N).
 
 - Every `delegate` result ends with `Subagent session: <path>`: the full transcript on disk (task, tool calls, readings), not the returned summary alone.
 - The transcript survives normal completion, turn-budget kill, stall kill, aborts, and parent death. Partial work from a killed child stays inspectable.
@@ -152,14 +159,14 @@ When `true`, every subagent keeps a persistent pi session instead of running eph
 
 Set to `false` to restore ephemeral children (`--no-session`). A child spawned with a per-task `cwd` override still writes into the parent's session dir: the link is by parent session, not by cwd.
 
-### `async` (boolean, default `true`)
+### Choosing the dispatch mode
 
-Default dispatch mode for the delegate tool. `true`: a dispatch without an explicit `async` parameter returns an acceptance immediately and the settled result is delivered into the conversation later. `false`: dispatches block until the final result, which suits short, sequential fleets.
+`async` sets the default dispatch mode for the delegate tool. `true`: a dispatch without an explicit `async` parameter returns an acceptance immediately and the settled result is delivered into the conversation later. `false`: dispatches block until the final result, which suits short, sequential fleets.
 
 - The per-call `async` parameter always overrides this default; chains are always blocking regardless.
 - The delegate tool description and the policy text are generated from this value, so the model's instructions always match the configured behavior.
 
-### `builtinFleet` (boolean | object, default `true`)
+### Customizing the builtin fleet
 
 Include the fleet shipped with the extension: **scout** (read-only recon), **planner** (read-only planning), **worker** (general-purpose, full tools), **reviewer** (read-only + shell). User and project agents always shadow builtins by name.
 
@@ -190,22 +197,20 @@ Set it in agent frontmatter (`thinking: high`) or, for builtins only, in the `bu
 
 An invalid value warns once and falls back to inheritance. The shipped fleet comes tuned: scout `low`, planner `high`, worker `medium`, reviewer `high`.
 
-### `modelOverrides` (object, default `{}`)
+### Pinning models
 
-Pins a model per agent name, e.g. `{ "scout": "openrouter/some-cheap-model" }`. Precedence: a `modelOverrides` entry beats the agent's frontmatter `model`, which beats the dispatching session's model. When the agent defines neither a model nor an explicit thinking level (see [Thinking levels](#thinking-levels)), the child also inherits the session's thinking level.
+`modelOverrides` pins a model per agent name, e.g. `{ "scout": "openrouter/some-cheap-model" }`. Precedence: a `modelOverrides` entry beats the agent's frontmatter `model`, which beats the dispatching session's model. When the agent defines neither a model nor an explicit thinking level (see [Thinking levels](#thinking-levels)), the child also inherits the session's thinking level.
 
-### `maxTurns` (positive integer, default `50`)
+### Turn budgets and stall recovery
 
-Turn budget for subagents, enforced in two stages:
+`maxTurns` sets the turn budget for subagents, enforced in two stages:
 
 - **Soft grace** at the budget: the child is steered once to wrap up and deliver its final answer.
 - **Hard kill** at budget + 5 turns: the child is terminated and the run reported as failed with a `turn-budget-exhausted` reason, preserving output produced so far.
 
-Values must be positive integers: strings, floats, zero, and negatives fall back to the default. A per-agent frontmatter `maxTurns` overrides this config default.
+A per-agent frontmatter `maxTurns` overrides this config default; invalid runtime values fall back to the default.
 
-### `stallTimeoutMs` (positive number, default `600000`)
-
-Wall-clock stall watchdog: any line a child writes to stdout resets the timer, and a child silent for this long is hard-killed and reported as failed with a `stall-timeout` reason, preserving output produced so far. There is no disable switch: to effectively disable it, set a huge value.
+`stallTimeoutMs` controls the wall-clock stall watchdog: any line a child writes to stdout resets the timer, and a child silent for this long is hard-killed and reported as failed with a `stall-timeout` reason, preserving output produced so far. There is no disable switch: to effectively disable it, set a huge value.
 
 ## Match custom and local extensions
 
@@ -301,10 +306,21 @@ Children inherit installed extensions automatically and run headless: a dangerou
 
 pi-orchestrator computes the delegation policy once per engagement from what is actually installed and reuses it verbatim every turn: the allow-list names the tools retained at compute time, the fleet section lists the agents discovered at that point, and the typical-flows example is composed from the discovered names. The text is regenerated when engagement turns on again (session start with `enabled: true`, or `/orchestrator` re-engage). Mid-session agent additions are covered by the delegate tool's `list` action and the schema enum, not by prompt rewrites. Nothing about other packages is hardcoded, so two installs with different packages produce slightly different policy text, and `builtinFleet: false`, `hidden: true`, and project agents all change what it says.
 
+## Maintaining the configuration schema
+
+After changing the shared definition in `src/config-schema.ts`, run this from the repository root and commit the generated `schemas/orchestrator.schema.json` alongside the change:
+
+```bash
+npm run schema:generate
+```
+
+Run it again before release and verify that the package includes the artifact, so the installed version's pinned public URL can resolve. Regeneration is an explicit maintainer responsibility; there is no new CI drift gate or workflow. See [ADR-0019](docs/adr/0019-config-json-schema.md).
+
 ## Files
 
 - `src/index.ts` handles the child watchdog, engagement, reduction, gate, and commands
 - `src/config.ts` implements orchestrator.jsonc (JSONC, comment-preserving writes), keep-list matchers, and runtime tool discovery
+- `src/config-schema.ts` owns the shared configuration definition; `schemas/orchestrator.schema.json` is its committed editor reference
 - `src/width.ts` provides ANSI-aware visible-width helpers for TUI rendering
 - `src/agents.ts` discovers the fleet (builtin, user, project tree)
 - `src/policy.ts` generates the delegation policy text from fleet and kept tools

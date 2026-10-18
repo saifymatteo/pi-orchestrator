@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as jsonc from "jsonc-parser";
 
 import {
 	builtinThinkingOverrides,
@@ -22,6 +23,9 @@ import {
 	toolIsKept,
 	toolMatchesAnyMatcher,
 } from "../src/config.ts";
+
+const packageVersion = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+const expectedSchemaUrl = `https://cdn.jsdelivr.net/npm/@saifymatteo/pi-orchestrator@${packageVersion}/schemas/orchestrator.schema.json`;
 
 // ── loadConfig / maxTurns validation ────────────────────────────────────────
 
@@ -276,6 +280,82 @@ test("saveConfig: unknown extra keys in the user's file are preserved", () => {
 		assert.match(raw, /keep me/, "user's extra key must survive");
 		assert.equal(loadConfig().maxTurns, 20);
 		assert.equal(loadConfig().enabled, false);
+	});
+});
+
+test("saveConfig: fresh and legacy configs gain the installed version's editor schema on save", () => {
+	const scenarios: Array<Record<string, string | null>> = [{}, { "orchestrator.json": '{ "maxTurns": 12 }' }];
+	for (const files of scenarios) {
+		withConfigFiles(files, () => {
+			saveConfig(loadConfig());
+			const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+			const document = jsonc.parse(fs.readFileSync(path.join(dir, "orchestrator.jsonc"), "utf8"));
+			assert.equal(document.$schema, expectedSchemaUrl);
+			assert.equal(fs.existsSync(path.join(dir, "orchestrator.json")), false);
+			assert.equal("$schema" in loadConfig(), false, "metadata is not a runtime setting");
+		});
+	}
+});
+
+test("saveConfig: refreshes only extension-owned schema URLs and preserves comments/custom references", () => {
+	const owned = "https://cdn.jsdelivr.net/npm/@saifymatteo/pi-orchestrator@0.1.0/schemas/orchestrator.schema.json";
+	const references = [
+		owned,
+		"https://cdn.jsdelivr.net/npm/@saifymatteo/pi-orchestrator@1.0.0-beta.1/schemas/orchestrator.schema.json",
+		expectedSchemaUrl,
+		"https://example.com/my.schema.json",
+		"./custom.schema.json",
+		`${owned}?custom=true`,
+		`${owned}.custom`,
+		owned.replace("pi-orchestrator@", "pi-orchestrator-extra@"),
+		owned.replace("cdn.jsdelivr.net", "example.com"),
+		null,
+	];
+	for (const [index, reference] of references.entries()) {
+		const source = `{\n  // Keep my reference annotation.\n  "$schema": ${JSON.stringify(reference)}, // Editor only.\n  "keepTools": ["delegate" /* Keep this too. */],\n  "myOwnNote": "keep me"\n}`;
+		withConfigFiles({ "orchestrator.jsonc": source }, () => {
+			const filename = path.join(process.env.PI_ORCH_TEST_AGENT_DIR!, "orchestrator.jsonc");
+			const config = loadConfig();
+			assert.equal(fs.readFileSync(filename, "utf8"), source, "loading must not rewrite the file");
+			assert.equal("$schema" in config, false);
+			saveConfig(config);
+			const text = fs.readFileSync(filename, "utf8");
+			const document = jsonc.parse(text);
+			assert.equal(document.$schema, index < 3 ? expectedSchemaUrl : reference);
+			assert.equal(document.myOwnNote, "keep me");
+			assert.match(text, /Keep my reference annotation/);
+			assert.match(text, /Editor only/);
+			assert.match(text, /Keep this too/);
+			saveConfig(loadConfig());
+			assert.equal(fs.readFileSync(filename, "utf8"), text, "a second save is byte-stable");
+		});
+	}
+});
+
+test("loadConfig: schema metadata neither changes normalization nor causes writes", () => {
+	withConfigFiles({}, () => {
+		loadConfig();
+		assert.deepEqual(fs.readdirSync(process.env.PI_ORCH_TEST_AGENT_DIR!), []);
+	});
+	const source = JSON.stringify({ $schema: "https://example.invalid/custom.json", maxTurn: 7, maxTurns: 0, async: false, keepTools: ["todo", 42, " "] });
+	withConfigFiles({ "orchestrator.jsonc": source }, () => {
+		const config = loadConfig();
+		assert.equal(config.maxTurns, 50);
+		assert.equal(config.async, false);
+		assert.deepEqual(config.keepTools, ["todo"]);
+		assert.equal("$schema" in config, false);
+		assert.equal("maxTurn" in config, false);
+		assert.equal(fs.readFileSync(path.join(process.env.PI_ORCH_TEST_AGENT_DIR!, "orchestrator.jsonc"), "utf8"), source);
+	});
+});
+
+test("saveConfig: failed JSONC write retains the original legacy file and its schema reference", () => {
+	const source = '{ "$schema": "./custom.schema.json", "maxTurns": 12 }';
+	withConfigFiles({ "orchestrator.json": source }, () => {
+		const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+		fs.mkdirSync(path.join(dir, "orchestrator.jsonc")); // Force the destination write to fail.
+		assert.throws(() => saveConfig(loadConfig()));
+		assert.equal(fs.readFileSync(path.join(dir, "orchestrator.json"), "utf8"), source);
 	});
 });
 

@@ -27,71 +27,10 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import * as jsonc from "jsonc-parser";
 
-export interface OrchestratorConfig {
-	/** Orchestration engaged by default (persistent toggle via /orchestrator). */
-	enabled: boolean;
-	/** Matchers for tools the orchestrator keeps while engaged. */
-	keepTools: string[];
-	/** Tool matchers blocked in every subagent (exact, glob, ext:<id>); always
-	 *  enforced two ways (ADR-0008, ADR-0017): pi-accepted matchers (exact, *
-	 *  glob) pass through to `--exclude-tools` and the rest are expanded
-	 *  parent-side to concrete tool names, plus child-side via tool_call block
-	 *  (backstop for tools neither path covers). */
-	childBlockedTools: string[];
-	/** Extension sources (path, npm, or git — pi's repeatable `-e` flag) loaded
-	 *  in every child (ADR-0008). Derived semantics: non-empty spawns children
-	 *  with `--no-extensions` plus one `-e` per entry (selective loading);
-	 *  empty lets children inherit every discovered extension (ADR-0005). */
-	childExtensions: string[];
-	/** Append the orchestrator parent's system prompt (pre-policy; includes
-	 *  installed extensions' promptGuidelines, e.g. CodeGraph usage) to every
-	 *  subagent's system prompt. Default true. */
-	forwardParentPrompt: boolean;
-	/** Include the fleet shipped with the extension (user agents always win by
-	 *  name). Boolean form: true = all builtins (default), false = none. Object
-	 *  form: per-builtin overrides keyed by agent name — `thinking` sets the
-	 *  builtin's thinking level (outranks its shipped frontmatter), `hidden:
-	 *  true` excludes the builtin before the name-merge (a user/project agent
-	 *  of the same name still works). Unlisted builtins stay included; entries
-	 *  for unknown names are inert. */
-	builtinFleet: boolean | Record<string, BuiltinFleetEntry>;
-	/** Per-agent model overrides, e.g. { "scout": "openrouter/some-cheap-model" }. */
-	modelOverrides: Record<string, string>;
-	/** Turn budget for subagents (ADR-0006). Must be a positive integer. */
-	maxTurns: number;
-	/** Wall-clock stall timeout for subagents in ms (ADR-0006). Any stdout
-	 *  activity resets it; a child silent for this long is hard-killed. Any
-	 *  positive number (no disable switch — use a huge value instead). */
-	stallTimeoutMs: number;
-	/** Persistent sub-sessions (ADR-0011). When true (default), each child run
-	 *  keeps a pi session file — written next to the parent's session, named
-	 *  `orch: <agent> — <task>`, and linked to the parent session via pi's
-	 *  parentSession header — so the transcript survives for reference
-	 *  (`delegate({action: "sessions"})` lists them). false restores
-	 *  ephemeral children (--no-session). */
-	childSessions: boolean;
-	/** Default dispatch mode for the delegate tool (ADR-0016). true (default):
-	 *  a dispatch without an explicit `async` parameter returns an acceptance
-	 *  immediately and the settled result is delivered into the conversation
-	 *  later. false: dispatches block until the final result. The per-call
-	 *  `async` parameter always overrides this default; chains are always
-	 *  blocking regardless. */
-	async: boolean;
-}
+import { DEFAULT_CONFIG, THINKING_LEVELS, type BuiltinFleetEntry, type OrchestratorConfig } from "./config-schema.ts";
 
-export const DEFAULT_CONFIG: OrchestratorConfig = {
-	enabled: true,
-	keepTools: ["delegate"],
-	childBlockedTools: [],
-	childExtensions: [],
-	forwardParentPrompt: true,
-	builtinFleet: true,
-	modelOverrides: {},
-	maxTurns: 50,
-	stallTimeoutMs: 600_000,
-	childSessions: true,
-	async: true,
-};
+export { DEFAULT_CONFIG, THINKING_LEVELS };
+export type { BuiltinFleetEntry, OrchestratorConfig };
 
 const CONFIG_FILENAME = "orchestrator.jsonc";
 const LEGACY_CONFIG_FILENAME = "orchestrator.json";
@@ -120,19 +59,6 @@ function readConfigText(): string | null {
 	} catch {
 		return null;
 	}
-}
-
-/** Valid thinking levels (pi's ThinkingLevel union); `thinking` frontmatter
- *  and `builtinFleet` entries accept exactly these strings. */
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-
-/** Per-builtin overrides in the `builtinFleet` object form. Field names match
- *  agent frontmatter: `thinking` sets the thinking level, `hidden: true`
- *  excludes the builtin from the fleet (pre-merge). An empty entry is valid:
- *  builtin included, no explicit level. */
-export interface BuiltinFleetEntry {
-	thinking?: ThinkingLevel;
-	hidden?: boolean;
 }
 
 /** Contexts already warned about an invalid thinking level (warn-once per
@@ -247,7 +173,7 @@ export function loadConfig(): OrchestratorConfig {
 					? Object.fromEntries(
 							Object.entries(raw.modelOverrides).filter(([, v]) => typeof v === "string" && v.trim() !== ""),
 						)
-					: {},
+					: { ...DEFAULT_CONFIG.modelOverrides },
 			maxTurns: parseMaxTurns(raw.maxTurns) ?? DEFAULT_CONFIG.maxTurns,
 			childSessions:
 				typeof raw.childSessions === "boolean" ? raw.childSessions : DEFAULT_CONFIG.childSessions,
@@ -261,7 +187,7 @@ export function loadConfig(): OrchestratorConfig {
 			childBlockedTools: [...DEFAULT_CONFIG.childBlockedTools],
 			childExtensions: [...DEFAULT_CONFIG.childExtensions],
 			forwardParentPrompt: DEFAULT_CONFIG.forwardParentPrompt,
-			modelOverrides: {},
+			modelOverrides: { ...DEFAULT_CONFIG.modelOverrides },
 			maxTurns: DEFAULT_CONFIG.maxTurns,
 		};
 	}
@@ -289,6 +215,14 @@ export function saveConfig(config: OrchestratorConfig): void {
 	// survive. Without an existing file (fresh install, or a file so malformed
 	// there is nothing to edit) the config is written as formatted JSON.
 	const sourceText = readConfigText();
+	const current = sourceText === null ? null : jsonc.parse(sourceText, [], { allowTrailingComma: true }) as Record<string, unknown>;
+	// @ts-expect-error TS1470: import.meta not allowed in CJS output (nodenext module)
+	const { version } = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+	const schemaUrl = `https://cdn.jsdelivr.net/npm/@saifymatteo/pi-orchestrator@${version}/schemas/orchestrator.schema.json`;
+	const document: Record<string, unknown> = { ...config };
+	const ownedSchema = typeof current?.$schema === "string" &&
+		/^https:\/\/cdn\.jsdelivr\.net\/npm\/@saifymatteo\/pi-orchestrator@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\/schemas\/orchestrator\.schema\.json$/.test(current.$schema);
+	if (current?.$schema === undefined || ownedSchema) document.$schema = schemaUrl;
 	let text: string;
 	if (sourceText !== null && sourceText.trim() !== "") {
 		const formatting: jsonc.FormattingOptions = { tabSize: 2, insertSpaces: true };
@@ -297,14 +231,13 @@ export function saveConfig(config: OrchestratorConfig): void {
 		// EOF, so batch-computing every edit against the original text would
 		// overlap. Keys whose value did not change are skipped entirely —
 		// rewriting them would drop comments INSIDE their values (e.g. keepTools).
-		const current = jsonc.parse(sourceText, [], { allowTrailingComma: true }) as Record<string, unknown>;
 		text = sourceText;
-		for (const [key, value] of Object.entries(config)) {
+		for (const [key, value] of Object.entries(document)) {
 			if (isDeepStrictEqual(current?.[key], value)) continue;
 			text = jsonc.applyEdits(text, jsonc.modify(text, [key], value, { formattingOptions: formatting }));
 		}
 	} else {
-		text = `${JSON.stringify(config, null, 2)}\n`;
+		text = `${JSON.stringify(document, null, 2)}\n`;
 	}
 	fs.writeFileSync(preferred, text.endsWith("\n") ? text : `${text}\n`, "utf-8");
 	// One-time migration: remove the legacy file only AFTER the .jsonc was

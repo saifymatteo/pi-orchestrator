@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Shared-source configuration JSON Schema for editor completion, hover documentation, and strict unknown-key diagnostics, with a committed `schemas/orchestrator.schema.json` artifact and version-pinned public references. Normal saves add or refresh extension-owned `$schema` references while preserving custom URLs and comments; loading never writes or fetches schemas, and runtime acceptance remains unchanged. README documents setup, development references pending the first schema-bearing release, and maintainer regeneration via `npm run schema:generate` (ADR-0019)
+
 ## [0.6.0] - 2026-10-09
 
 ### Added
