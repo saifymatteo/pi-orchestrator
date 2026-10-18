@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-18
+
 ### Added
 
 - Shared-source configuration JSON Schema for editor completion, hover documentation, and strict unknown-key diagnostics, with a committed `schemas/orchestrator.schema.json` artifact and version-pinned public references. Normal saves add or refresh extension-owned `$schema` references while preserving custom URLs and comments; loading never writes or fetches schemas, and runtime acceptance remains unchanged. README documents setup, development references pending the first schema-bearing release, and maintainer regeneration via `npm run schema:generate` (ADR-0019)
@@ -163,6 +165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - First version of the project: orchestrator extension for pi with fleet delegation, unit tests, ADRs, and npm packaging
 
+[0.7.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.3.2...v0.4.0
