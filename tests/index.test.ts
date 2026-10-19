@@ -494,6 +494,40 @@ test("AUTO before_agent_start stays hands-off even when tools were stripped", as
 	});
 });
 
+test("AUTO captures the current parent prompt on every turn without appending policy", async () => {
+	const { stub, handlers, calls } = toolsetPi();
+	await withAgentDir(false, async () => {
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		const deps = buildDelegateDeps(() => DEFAULT_CONFIG, () => {});
+		assert.equal(deps.getParentPrompt?.(), undefined);
+		for (const systemPrompt of ["AUTO guidelines v1", "AUTO guidelines v2"]) {
+			const result = await handlers.before_agent_start[0]({ systemPrompt }, {});
+			assert.equal(result, undefined, "AUTO must not append the delegation policy");
+			assert.equal(deps.getParentPrompt?.(), systemPrompt, "Workers must receive this turn's guidelines");
+		}
+		assert.equal(calls.length, 0, "prompt capture must not change the AUTO tool set");
+	});
+});
+
+test("engaged-to-AUTO forwarding replaces the old pre-policy prompt and resets across sessions", async () => {
+	const { stub, handlers } = toolsetPi();
+	await withAgentDir(true, async () => {
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		const deps = buildDelegateDeps(() => DEFAULT_CONFIG, () => {});
+		const engaged = await handlers.before_agent_start[0]({ systemPrompt: "engaged guidelines" }, {});
+		assert.notEqual(engaged.systemPrompt, "engaged guidelines", "engaged turns still append policy");
+		assert.equal(deps.getParentPrompt?.(), "engaged guidelines", "forwarding must exclude that policy");
+		await (handlers as any).command.orchestrator("", {});
+		const result = await handlers.before_agent_start[0]({ systemPrompt: "current AUTO guidelines" }, {});
+		assert.equal(result, undefined);
+		assert.equal(deps.getParentPrompt?.(), "current AUTO guidelines", "must not forward the last engaged prompt");
+		await handlers.session_start[0]({}, {});
+		assert.equal(deps.getParentPrompt?.(), undefined, "a new session must not inherit the previous prompt");
+	});
+});
+
 test("toggle-off via /orchestrator restores extensions + core builtins, not optional builtins", async () => {
 	const { stub, handlers, calls } = toolsetPi();
 	await withAgentDir(true, async () => {

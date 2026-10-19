@@ -491,14 +491,14 @@ export default function (pi: any) {
 	// turn keeps the provider prompt-cache prefix stable.
 
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
+		// Capture the current pre-policy prompt in both AUTO and engaged mode
+		// for Worker forwarding (forwardParentPrompt); this changes no tools.
+		parentSystemPrompt = event.systemPrompt;
 		if (!engaged) {
 			// AUTO: hands-off — pi's defaultTools recomputation and other
 			// extensions' phase gating own the active set in this mode.
 			return;
 		}
-		// Capture the parent's real (pre-policy) prompt each turn, before the
-		// policy append below, for forwarding to subagents (forwardParentPrompt).
-		parentSystemPrompt = event.systemPrompt;
 		if (ctx?.ui) lastUi = ctx.ui;
 
 		// Re-apply the reduction: catches tools registered after session_start

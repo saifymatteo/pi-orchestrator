@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Parent prompt forwarding captures current pre-policy guidelines in AUTO as well as engaged mode, avoiding missing guidelines in fresh AUTO sessions and stale guidelines after disengaging. AUTO tool access and policy behavior remain unchanged.
 - Accepted runs retain their original id through unexpected runner failure and per-run cancellation, including queued work. Slots remain occupied through cleanup; ESC and teardown stop all accepted work and suppress result pushes.
 - `/orchestrator-tools` now saves binary per-tool choices as overrides instead of rewriting `keepTools`, preserving automatic discovery and group rules for siblings and future tools. Choosing the baseline result removes that tool's override. Successful manual edits refresh the advertised policy; failed saves restore the previous choice without applying new permissions.
 - Successful configuration writes are no longer reported as failed when subsequent legacy-file cleanup fails; cleanup emits a warning instead.

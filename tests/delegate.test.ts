@@ -1029,6 +1029,7 @@ type RecordedCall = {
 	agent: string;
 	task: string;
 	maxTurns: number;
+	blockedTools: string[];
 	killCount: number;
 };
 
@@ -1077,7 +1078,7 @@ function dispatchHarness(agents: any[] | null = null, depsOverride: Record<strin
 	const pending = new Map<number, (result: SingleResult) => void>();
 	let nextRunKey = 1;
 	const runAgent = (call: any) => {
-		const record: RecordedCall = { agent: call.agentName, task: call.task, maxTurns: call.maxTurns, killCount: 0 };
+		const record: RecordedCall = { agent: call.agentName, task: call.task, maxTurns: call.maxTurns, blockedTools: call.blockedTools, killCount: 0 };
 		call.registerKill?.(() => record.killCount++);
 		calls.push(record);
 		const key = nextRunKey++;
@@ -1144,6 +1145,25 @@ function dispatchHarness(agents: any[] | null = null, depsOverride: Record<strin
 }
 
 const flushD = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+for (const mode of ["auto", "engaged"] as const) {
+	test(`child tool policy: ${mode} dispatch applies global blocks plus agent blocks`, async () => {
+		const h = dispatchHarness([{
+			name: "scout", description: "Recon", source: "builtin",
+			systemPrompt: "Scout prompt", filePath: "builtin:scout",
+			blockTools: ["agent_only", "shared"],
+		}], {
+			getOrchestratorMode: () => mode,
+			getChildBlockedTools: () => ["global_only", "shared"],
+		});
+		await h.execute({ agent: "scout", task: "check child policy" });
+		assert.equal(h.calls.length, 1);
+		assert.deepEqual(h.calls[0].blockedTools, ["global_only", "shared", "agent_only"],
+			"global blocks must stay active regardless of engagement; agents can only add blocks");
+		h.resolveRun();
+		await flushD();
+	});
+}
 
 test("async default: single dispatch returns an acceptance immediately (runner not awaited)", async () => {
 	const h = dispatchHarness();

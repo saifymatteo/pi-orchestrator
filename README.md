@@ -154,7 +154,7 @@ Discovered extension groups appear read-only in `/orchestrator-tools`; individua
 
 ### Child tool policy
 
-`childBlockedTools` blocks tool matchers in every subagent, using the same matcher semantics as `keepTools`. Empty or absent means nothing is blocked.
+`childBlockedTools` blocks tool matchers in every subagent, using the same matcher semantics as `keepTools`. It applies to every `delegate` spawn whether the parent is engaged or in AUTO; it does not restrict the parent's tools. Empty or absent means nothing is blocked.
 
 - **Additive with per-agent `blockTools`**: the effective block list is the global matchers plus the agent's frontmatter matchers. The config is a floor: an agent can add blocks but never re-grant a globally blocked tool.
 - **Enforced twice**: matchers pi's `--exclude-tools` accepts (exact names and `*` globs) pass through to it verbatim, so the child's own registry filters them (covering tools the parent's registry cannot see, e.g. when a per-task `cwd` loads extra project extensions); `ext:<id>` and `?` matchers expand against the parent's registry to concrete names first (matchers that expand to nothing are skipped silently there). On top of that, a child-side gate blocks any matching tool call with a visible reason (`Blocked by orchestrator policy: …`), so the subagent can adapt instead of failing opaquely. The gate also covers case-mismatched or unseen tools the spawn-time pass misses: blocked tools stay visible but never execute.
@@ -172,7 +172,7 @@ To keep the child-side tool gate and orphan watchdog alive in isolated children,
 
 ### Parent prompt forwarding
 
-With `forwardParentPrompt: true`, every subagent gets the parent's pre-policy system prompt appended at the end of its own. The parent writes the prompt to a temp file and passes the path via `PI_ORCHESTRATOR_PARENT_PROMPT_FILE`; a child-side hook appends it last, after pi's base prompt, the agent body, project context, skills, and cwd.
+With `forwardParentPrompt: true`, every subagent gets the parent's pre-policy system prompt appended at the end of its own. The parent captures the current prompt on every turn in both AUTO and engaged mode; AUTO still leaves the parent's toolset untouched and appends no delegation policy. The parent writes the prompt to a temp file and passes the path via `PI_ORCHESTRATOR_PARENT_PROMPT_FILE`; a child-side hook appends it last, after pi's base prompt, the agent body, project context, skills, and cwd.
 
 This ordering maximizes the stable shared prefix across children, which improves provider prompt-cache hit rates: only the task-specific tail differs. The appended prompt also carries installed extensions' prompt guidelines (e.g. CodeGraph's tool usage guidance) into subagents.
 
