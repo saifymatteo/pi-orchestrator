@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `keepToolOverrides` (default `{}`): case-insensitive exact tool-name exceptions with `allowed` / `blocked` values, applied after the unchanged `keepTools` baseline for the engaged parent only. `delegate` remains always allowed; AUTO mode and Workers are unchanged.
+
+### Fixed
+
+- `/orchestrator-tools` now saves binary per-tool choices as overrides instead of rewriting `keepTools`, preserving automatic discovery and group rules for siblings and future tools. Choosing the baseline result removes that tool's override. Successful manual edits refresh the advertised policy; failed saves restore the previous choice without applying new permissions.
+- Successful configuration writes are no longer reported as failed when subsequent legacy-file cleanup fails; cleanup emits a warning instead.
+
 ## [0.7.0] - 2026-10-18
 
 ### Added

@@ -29,6 +29,26 @@
         ]
       ]
     },
+    "keepToolOverrides": {
+      "type": "object",
+      "patternProperties": {
+        "\\S": {
+          "enum": [
+            "allowed",
+            "blocked"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "description": "Exact tool-name exceptions to keepTools for the engaged parent, case-insensitive. allowed or blocked overrides the baseline rule; delegate is always allowed. Omitted or {} follows keepTools. Keys are literal names, not globs or ext: matchers. The binary tool editor changes only these exceptions and removes an exception when the selected access matches the baseline. AUTO mode and subagents are unaffected.",
+      "default": {},
+      "examples": [
+        {
+          "foo_a": "blocked",
+          "read": "allowed"
+        }
+      ]
+    },
     "childBlockedTools": {
       "type": "array",
       "items": {

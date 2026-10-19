@@ -17,6 +17,7 @@ test("published JSON schema describes defaults and validates editable values wit
 	assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
 	assert.deepEqual(schema.properties.keepTools.default, ["delegate"]);
 	assert.match(schema.properties.keepTools.description, /auto-keeps/);
+	assert.deepEqual(schema.properties.keepToolOverrides.default, {});
 	assert.equal(schema.properties.maxTurns.default, 50);
 	assert.equal(schema.properties.stallTimeoutMs.default, 600000);
 	const empty = {};
@@ -24,6 +25,8 @@ test("published JSON schema describes defaults and validates editable values wit
 	assert.deepEqual(empty, {}, "validation must not populate document defaults");
 	for (const valid of [
 		{ keepTools: [], childExtensions: [], childBlockedTools: [] },
+		{ keepToolOverrides: { foo_a: "blocked", read: "allowed", "foo_*": "allowed" } },
+		{ keepToolOverrides: { ["__proto__"]: "allowed", "custom\nname": "blocked" } },
 		{ builtinFleet: false },
 		{ builtinFleet: {} },
 		{ builtinFleet: { futureAgent: {}, worker: { thinking: "xhigh", hidden: true } } },
@@ -37,6 +40,8 @@ test("published JSON schema describes defaults and validates editable values wit
 		{ stallTimeoutMs: 0 }, { stallTimeoutMs: -1 }, { stallTimeoutMs: "600" },
 		{ enabled: "yes" }, { async: "false" }, { forwardParentPrompt: null }, { childSessions: 1 },
 		{ keepTools: [" "] }, { childBlockedTools: [42] }, { childExtensions: [""] },
+		{ keepToolOverrides: [] }, { keepToolOverrides: { foo: true } },
+		{ keepToolOverrides: { foo: "allow" } }, { keepToolOverrides: { " ": "blocked" } },
 		{ modelOverrides: { scout: "  " } }, { modelOverrides: [] },
 		{ builtinFleet: [] }, { builtinFleet: { worker: { thinkng: "high" } } },
 		{ builtinFleet: { worker: { hidden: "yes" } } }, { builtinFleet: { worker: { thinking: "ultra" } } },

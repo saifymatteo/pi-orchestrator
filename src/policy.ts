@@ -9,7 +9,7 @@
  * allow-list, the fleet, and the file-work mandate. Nothing here restates the
  * tool's guidelines.
  *
- * The TEXT is computed once per engagement episode and cached (ADR-0013):
+ * The TEXT is cached until an engagement boundary or explicit permission edit (ADR-0013):
  * pi rebuilds the system prompt each turn, so the append must stay
  * per-turn, but reusing identical text keeps the provider prompt-cache
  * prefix stable even when the fleet changes mid-session. Generated from
@@ -18,14 +18,13 @@
  */
 
 import type { AgentConfig } from "./agents.ts";
-import type { DiscoveredTool } from "./config.ts";
 
-export function buildPolicy(agents: AgentConfig[], keptTools: DiscoveredTool[]): string {
+export function buildPolicy(agents: AgentConfig[], keptTools: string[]): string {
 	const fleet = agents
 		.map((a) => `- **${a.name}**${a.tools ? ` (tools: ${a.tools.join(", ")})` : " (full tools)"}: ${a.description}`)
 		.join("\n");
 
-	const retained = keptTools.flatMap((t) => t.names).sort();
+	const retained = [...keptTools].sort();
 	const allowList =
 		retained.length > 0
 			? `\`delegate\` (always available) plus these retained tools: ${retained.join(", ")}.`

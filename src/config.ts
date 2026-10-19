@@ -150,13 +150,22 @@ export function loadConfig(): OrchestratorConfig {
 		// jsonc-parser reports problems instead of throwing — treat any parse
 		// error like today's JSON.parse throw: fall back to defaults.
 		const errors: jsonc.ParseError[] = [];
-		const raw = jsonc.parse(text, errors, { allowTrailingComma: true }) as Partial<OrchestratorConfig>;
+		// getNodeValue preserves literal keys such as __proto__ in null-prototype
+		// objects; jsonc.parse assigns into ordinary objects and loses them.
+		const tree = jsonc.parseTree(text, errors, { allowTrailingComma: true });
+		const raw = tree && jsonc.getNodeValue(tree) as Partial<OrchestratorConfig>;
 		if (errors.length > 0 || !raw || typeof raw !== "object") throw new Error("invalid config");
 		return {
 			enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_CONFIG.enabled,
 			keepTools: Array.isArray(raw.keepTools)
 				? raw.keepTools.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
 				: DEFAULT_CONFIG.keepTools,
+			keepToolOverrides:
+				raw.keepToolOverrides && typeof raw.keepToolOverrides === "object" && !Array.isArray(raw.keepToolOverrides)
+					? Object.fromEntries(Object.entries(raw.keepToolOverrides)
+						.filter(([name, value]) => name.trim().length > 0 && (value === "allowed" || value === "blocked"))
+						.map(([name, value]) => [name.toLowerCase(), value]))
+					: {},
 			childBlockedTools: Array.isArray(raw.childBlockedTools)
 				? raw.childBlockedTools.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
 				: DEFAULT_CONFIG.childBlockedTools,
@@ -184,6 +193,7 @@ export function loadConfig(): OrchestratorConfig {
 		return {
 			...DEFAULT_CONFIG,
 			keepTools: [...DEFAULT_CONFIG.keepTools],
+			keepToolOverrides: { ...DEFAULT_CONFIG.keepToolOverrides },
 			childBlockedTools: [...DEFAULT_CONFIG.childBlockedTools],
 			childExtensions: [...DEFAULT_CONFIG.childExtensions],
 			forwardParentPrompt: DEFAULT_CONFIG.forwardParentPrompt,
@@ -242,7 +252,13 @@ export function saveConfig(config: OrchestratorConfig): void {
 	fs.writeFileSync(preferred, text.endsWith("\n") ? text : `${text}\n`, "utf-8");
 	// One-time migration: remove the legacy file only AFTER the .jsonc was
 	// written successfully, so a failed write never loses the user's config.
-	if (fs.existsSync(legacy)) fs.rmSync(legacy);
+	try {
+		if (fs.existsSync(legacy)) fs.rmSync(legacy);
+	} catch (err) {
+		// The new file is already committed and preferred on the next load.
+		// Cleanup must not make callers roll back a successfully saved edit.
+		console.error("[pi-orchestrator] Config saved, but could not remove legacy config:", err);
+	}
 }
 
 /**
@@ -327,10 +343,28 @@ export function toolMatchesAnyMatcher(
 export function toolIsKept(
 	tool: { name: string; sourceInfo?: { path?: string; source?: string } },
 	keepTools: string[],
+	overrides: OrchestratorConfig["keepToolOverrides"] = {},
 ): boolean {
-	if (tool.name === "delegate") return true;
+	const name = tool.name.toLowerCase();
+	if (name === "delegate") return true;
+	// loadConfig normalizes exact keys; never interpret them as matchers or
+	// read inherited object properties such as constructor or __proto__.
+	if (Object.hasOwn(overrides, name)) return overrides[name] === "allowed";
 	const extensionId = deriveExtensionId(tool);
 	return keepTools.some((matcher) => matcherMatches(matcher, tool.name, extensionId));
+}
+
+/** Binary edit: preserve baseline rules, storing only an exact-name exception. */
+export function updateKeepToolOverrides(
+	tool: { name: string; sourceInfo?: { path?: string; source?: string } },
+	allowed: boolean,
+	baseline: string[],
+	overrides: OrchestratorConfig["keepToolOverrides"],
+): OrchestratorConfig["keepToolOverrides"] {
+	const name = tool.name.toLowerCase();
+	const next = Object.fromEntries(Object.entries(overrides).filter(([key]) => key.toLowerCase() !== name));
+	if (name === "delegate" || allowed === toolIsKept(tool, baseline)) return next;
+	return { ...next, [name]: allowed ? "allowed" : "blocked" };
 }
 
 /** A tool discovered at runtime, grouped by its owning extension/package (ADR-0004). */
@@ -414,8 +448,8 @@ export function discoverKeptTools(
  *     discovered extensions contribute nothing. An explicit `ext:<id>`
  *     config entry keeps the whole extension, partial or not.
  * DEFAULT_CONFIG.keepTools is ["delegate"] (non-empty), so the out-of-the-box
- * behavior is keep-list-only. Derived per turn — never persisted; only
- * `config.keepTools` is written back to orchestrator.jsonc.
+ * behavior is keep-list-only. This derived baseline is never persisted;
+ * configured matchers and per-tool overrides are stored independently.
  */
 export function effectiveKeepTools(configKeepTools: string[], discovered: DiscoveredTool[]): string[] {
 	const matchers = new Set<string>();

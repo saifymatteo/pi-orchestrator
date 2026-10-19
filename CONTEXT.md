@@ -35,13 +35,16 @@ The persistent pi session each delegate dispatch writes for its subagent (ADR-00
 Whether orchestration mode is active for a session. When engaged: the delegation policy is part of the system prompt every turn (the same cached text each turn — a stable guideline, not a per-turn reminder), and the Orchestrator's tools are reduced to the Keep-list. When disengaged: pi behaves normally. The `/orchestrator` command toggles engagement persistently (see ADR-0003).
 
 ### Keep-list
-The configurable set of tool names that stay active for the Orchestrator while engaged. Everything else is removed from the active set AND hard-blocked. Semantics are derived from emptiness: an empty keep-list auto-keeps every discovered extension; a non-empty keep-list keeps exactly the configured matchers plus `delegate` — discovered extensions are displayed but not kept unless a matcher names them (see ADR-0004). Stored in `~/.pi/agent/orchestrator.json`.
+The set of tools available to the engaged Orchestrator: its baseline comes from `keepTools` in `~/.pi/agent/orchestrator.jsonc` — empty means auto-kept discovered non-builtin extension tools with builtin-shadow exclusions; non-empty means configured matchers plus `delegate` (see ADR-0004). The effective Keep-list is that baseline after Per-tool overrides, with `delegate` always allowed; tools outside it are removed from the active set and hard-blocked.
+
+### Per-tool override
+An individual allowed/blocked exception to the Keep-list baseline for one exact tool name, matched case-insensitively, without changing automatic discovery or group rules for siblings and future tools. It applies only to the engaged Orchestrator, never AUTO mode or Workers, and cannot block `delegate`.
 
 ### Gate
-The hard enforcement layer: a `tool_call` interception that blocks any tool call from the Orchestrator that is not on the Keep-list, with a reason instructing it to use `delegate`. The Gate is the teeth; the policy is the instruction (see ADR-0001).
+The hard enforcement layer: a `tool_call` interception that blocks any tool call from the Orchestrator that is not on the effective Keep-list, with a reason instructing it to use `delegate`. The Gate is the teeth; the policy is the instruction (see ADR-0001).
 
 ### Policy (delegation policy)
-The guideline block in the Orchestrator's system prompt while engaged, defining the Orchestrator role, the Fleet, typical flows, and when trivial Q&A needs no delegation. Generated from the discovered Fleet and Keep-list at engagement time; its text then stays fixed for the engagement episode (mid-session Fleet additions are covered by the delegate tool's discovery actions, not by prompt rewrites). Distinct from the Gate, which enforces what the Policy describes (see ADR-0001).
+The guideline block in the Orchestrator's system prompt while engaged, defining the Orchestrator role, the Fleet, typical flows, and when trivial Q&A needs no delegation. Generated from the discovered Fleet and Keep-list at engagement time; its text then stays fixed until an engagement boundary or an explicit tool-permission edit (mid-session Fleet additions are covered by the delegate tool's discovery actions, not by prompt rewrites). Distinct from the Gate, which enforces what the Policy describes (see ADR-0001).
 
 ### Child mode
 The state in which the extension detects it is running inside a Worker's child `pi` process (via the `PI_ORCHESTRATOR_CHILD=1` environment variable) and fully self-disables: no policy, no Gate, no tool reduction.

@@ -44,8 +44,8 @@ While engaged, the orchestrator parent runs on these layers:
 | Layer | Mechanism |
 |---|---|
 | Policy | `before_agent_start` appends a delegation policy every turn: cached text, computed once per engagement from the discovered fleet and kept tools |
-| Reduction | `setActiveTools` keeps only the keep-list, re-applied every turn to catch late-registered tools |
-| Gate | `tool_call` blocks anything not on the keep-list and nudges the model to delegate |
+| Reduction | `setActiveTools` keeps only the effective keep-list (baseline plus per-tool overrides), re-applied every turn to catch late-registered tools |
+| Gate | `tool_call` blocks anything not on the effective keep-list and nudges the model to delegate |
 | Delegate tool | spawns `pi --mode rpc` children with `PI_ORCHESTRATOR_CHILD=1`; persistent sub-sessions by default (file-per-run in the parent's session dir, linked via `new_session {parentSession}`) |
 | Turn budget | soft-grace steer at the budget, hard kill at budget + 5 turns |
 | Stall watchdog | hard-kills a child silent for `stallTimeoutMs` (default 10 min); any output resets it |
@@ -99,22 +99,36 @@ See [ADR-0019](docs/adr/0019-config-json-schema.md) for the editor/runtime bound
 
 Orchestration starts engaged unless configured otherwise with `enabled`. `/orchestrator` toggles it and persists the new value here.
 
-`keepTools` controls the engaged parent's tool access.
+`keepTools` defines the baseline for the engaged parent's tool access; `keepToolOverrides` applies individual exceptions. Neither changes AUTO (disengaged) mode or Workers' tool access.
 
-Matchers for tools the orchestrator keeps while engaged, all case-insensitive:
+Baseline matchers, all case-insensitive:
 
 - **Exact name**: `"todo"` matches the `todo` tool.
 - **Glob**: `"hindsight_*"`, where `*` matches any run of characters and `?` a single one.
 - **Extension id**: `"ext:@luxusai/pi-hindsight"` matches every tool registered by that package, including tools added in future versions.
 
-`delegate` is always kept, with or without a matcher. The list's emptiness decides the mode:
+`delegate` is always kept, with or without a matcher or override. The list's emptiness decides the baseline mode:
 
 - **Empty**: auto-keeps every discovered non-builtin extension, each contributing an `ext:<id>` matcher each turn. Extensions that re-register a builtin tool name contribute only their non-colliding tools, kept by exact name.
-- **Non-empty** (the default): an exact allow-list. Only matching tools stay, plus `delegate`.
+- **Non-empty** (the default): only matching tools stay, plus `delegate`, before per-tool overrides.
 
-Discovered packages always appear read-only in `/orchestrator-tools`; availability is decided by the mode above. Stale `ext:` entries stay valid: they match nothing while the package is absent and match again when it returns.
+Discovered extension groups appear read-only in `/orchestrator-tools`; individual tools can be toggled without changing the baseline. Stale `ext:` entries stay valid: they match nothing while the package is absent and match again when it returns.
 
-**Builtin-shadowing:** extensions that re-register a builtin tool name (`read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`) are excluded from auto-keep unless explicitly listed as `ext:<id>`. Registration replaces the builtin wholesale, so auto-keeping the shadow would resurrect a core tool the config never listed. An explicit `ext:<id>` entry re-enables the whole extension.
+**Builtin-shadowing:** extensions that re-register a builtin tool name (`read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`) are excluded from auto-keep unless explicitly listed as `ext:<id>`. Registration replaces the builtin wholesale, so auto-keeping the shadow would resurrect a core tool the config never listed. An explicit `ext:<id>` entry re-enables the whole extension; a per-tool override can allow just one tool.
+
+`keepToolOverrides` defaults to `{}`. Its keys are exact tool names matched case-insensitively, **not** globs or `ext:` matchers; values are `"allowed"` or `"blocked"`. Each override wins over the baseline for that tool, except that `delegate` is always allowed. The result is the **effective keep-list**, used by both tool reduction and the Gate.
+
+```jsonc
+{
+  "keepTools": ["delegate", "hindsight_*"],
+  "keepToolOverrides": {
+    "hindsight_reflect": "blocked", // block one member of the kept group
+    "todo": "allowed" // allow one tool outside the baseline
+  }
+}
+```
+
+`/orchestrator-tools` offers a binary allowed/blocked choice per tool. It writes only that tool's override, never `keepTools`; choosing the baseline result removes the tool's override instead. Automatic discovery and group matchers keep governing siblings and future tools, so toggling one tool never freezes the discovered tool list or rewrites a group rule. A successful manual edit refreshes the cached policy on the next engaged turn so its advertised allow-list matches the new permissions; ordinary turns and background discovery retain the existing cache (ADR-0013). If saving fails, the editor restores the previous choice and leaves permissions unchanged.
 
 ### Child tool policy
 
@@ -231,13 +245,13 @@ Common goals and the config that expresses each:
 | Goal | Parent (main agent) | Children |
 |---|---|---|
 | Keep for parent, block for children | add the matcher to `keepTools` | add the same matcher to `childBlockedTools` |
-| Block for parent, keep for children | omit it from `keepTools` | leave it out of `childBlockedTools` |
-| Keep everywhere | add to `keepTools` | leave `childBlockedTools` alone |
-| Block everywhere | omit from `keepTools` | add to `childBlockedTools` |
+| Block for parent, keep for children | exclude it from the baseline, or block an individual tool with `keepToolOverrides` | leave it out of `childBlockedTools` |
+| Keep everywhere | add to `keepTools`, or allow an individual tool with `keepToolOverrides` | leave `childBlockedTools` alone |
+| Block everywhere | exclude it from the baseline, or block an individual tool with `keepToolOverrides` | add to `childBlockedTools` |
 
-The parent column applies while orchestration is engaged: `keepTools` is an allow-list, so anything not listed is unavailable, and a disengaged session (via `/orchestrator`) exposes all tools again. The child column applies on every `delegate` spawn regardless of engagement. To exclude an extension's code from children entirely, not just its tools, see [Child extension control](#child-extension-control).
+The parent column applies only while orchestration is engaged: availability follows the baseline plus per-tool overrides, with `delegate` always allowed. Omitting a matcher blocks a tool only if no other baseline rule keeps it (including automatic discovery with `keepTools: []`) and no override allows it. AUTO mode (via `/orchestrator`) exposes all tools again. The child column applies on every `delegate` spawn regardless of engagement. To exclude an extension's code from children entirely, not just its tools, see [Child extension control](#child-extension-control).
 
-To find the id a tool actually derives, run `/orchestrator-tools`: every discovered extension appears read-only as `ext:<id>` with the tool names it registered.
+To find the id a tool actually derives, run `/orchestrator-tools`: every discovered extension group appears read-only as `ext:<id>` with the tool names it registered; individual tool choices write per-tool overrides.
 
 ## Agent definitions
 
@@ -300,7 +314,7 @@ Children inherit installed extensions automatically and run headless: a dangerou
 ## Commands
 
 - `/orchestrator`: toggle orchestration (persisted to `orchestrator.jsonc`; startup notifies when disengaged)
-- `/orchestrator-tools`: checkbox UI over the keep-list (TUI only); discovered `ext:` matchers are read-only; long tool lists truncate to terminal width (capped at 6 names + `+N more`)
+- `/orchestrator-tools`: binary allowed/blocked UI for individual tools (TUI only); saves only per-tool overrides, removing an override when the choice matches the baseline, and never changes `keepTools`; discovered `ext:` groups are read-only; long tool lists truncate to terminal width (capped at 6 names + `+N more`)
 
 ## Policy and fleet text
 

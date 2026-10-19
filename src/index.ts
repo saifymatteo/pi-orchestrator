@@ -7,7 +7,7 @@
  *   1. Tools outside the keep-list are removed from the active set
  *      (re-applied every turn to catch dynamically registered tools).
  *   2. A delegation policy is appended to the system prompt every turn —
- *      the same cached text for the whole engagement episode (ADR-0013).
+ *      cached between engagement boundaries and explicit permission edits (ADR-0013).
  *   3. A hard gate blocks any non-keep-list tool call with guidance to delegate.
  *
  * Child mode (PI_ORCHESTRATOR_CHILD=1): the extension self-disables and only
@@ -23,8 +23,8 @@ import { discoverAgents } from "./agents.ts";
 import {
 	discoverKeptTools,
 	effectiveKeepTools,
-	matchersForTool,
 	toolIsKept,
+	updateKeepToolOverrides,
 	toolMatchesAnyMatcher,
 	loadConfig,
 	saveConfig,
@@ -254,7 +254,7 @@ let parentSystemPrompt: string | undefined;
  * keep-list changed) and silently invalidated the provider prompt-cache
  * prefix on mid-session fleet changes. The text is therefore computed lazily
  * on the first engaged turn (so tool discovery is complete) and reused
- * verbatim for the whole engagement episode. Exported for unit tests
+ * verbatim until an episode boundary or explicit permission edit. Exported for unit tests
  * (tests/index.test.ts).
  */
 export function createPolicyTextCache(
@@ -342,22 +342,17 @@ export default function (pi: any) {
 
 	// Policy text for the current engagement episode (ADR-0013). Computed
 	// lazily on the first engaged turn — applyReduction() has just refreshed
-	// `discovered`, so tool discovery is complete — then reused verbatim.
+	// `discovered`, so tool discovery is complete — then reused until a toggle,
+	// session start, or explicit tool-permission edit (ADR-0013 refinement).
 	function computePolicyText(): string {
 		const agents: AgentConfig[] = discoverAgents(config);
-		// Policy text must only advertise tools the gate actually allows: under
-		// keep-list-only (non-empty keepTools) most discovered extensions
-		// are not kept, so filter the discovered groups down to the kept tools.
+		// Advertise the same permissions the Gate enforces, including explicit
+		// overrides for builtins and tools excluded from automatic discovery.
 		const effective = effectiveKeepTools(config.keepTools, discovered);
-		const keptDiscovered = discovered
-			.map((d) => ({
-				...d,
-				// source: d.extensionId makes deriveExtensionId return the same id
-				// discoverKeptTools derived (d.names excludes shadow-skipped tools).
-				names: d.names.filter((n) => toolIsKept({ name: n, sourceInfo: { source: d.extensionId } }, effective)),
-			}))
-			.filter((d) => d.names.length > 0);
-		return buildPolicy(agents, keptDiscovered);
+		const keptNames = pi.getAllTools()
+			.filter((tool: any) => tool.name !== "delegate" && toolIsKept(tool, effective, config.keepToolOverrides))
+			.map((tool: any) => tool.name);
+		return buildPolicy(agents, keptNames);
 	}
 
 	const policyCache = createPolicyTextCache(computePolicyText);
@@ -390,7 +385,7 @@ export default function (pi: any) {
 			discovered = discoverKeptTools(all, config.keepTools);
 			if (engaged) {
 				const effective = effectiveKeepTools(config.keepTools, discovered);
-				const kept = all.filter((t) => toolIsKept(t, effective)).map((t) => t.name);
+				const kept = all.filter((t) => toolIsKept(t, effective, config.keepToolOverrides)).map((t) => t.name);
 				// Disengaging later runs the branch below; keep delegate so the
 				// fleet stays dispatchable while engaged.
 				pi.setActiveTools(Array.from(new Set([...kept, "delegate"])));
@@ -521,7 +516,7 @@ ${policyCache.get()}` };
 
 		const tool = pi.getAllTools().find((t: any) => t.name === event.toolName);
 		const effective = effectiveKeepTools(config.keepTools, discovered);
-		const allowed = toolIsKept({ name: event.toolName, sourceInfo: tool?.sourceInfo }, effective);
+		const allowed = toolIsKept({ name: event.toolName, sourceInfo: tool?.sourceInfo }, effective, config.keepToolOverrides);
 		if (allowed) return;
 
 		const fleetNames = discoverAgents(config).map((a) => a.name).join(", ");
@@ -559,12 +554,13 @@ ${policyCache.get()}` };
 			}
 
 			const allTools: any[] = pi.getAllTools();
+			discovered = discoverKeptTools(allTools, config.keepTools);
 			const effective = effectiveKeepTools(config.keepTools, discovered);
 			const items: SettingItem[] = allTools.map((tool) => ({
 				id: tool.name,
 				label: tool.name,
-				currentValue: matchersForTool(tool, effective).length > 0 ? "allowed" : "blocked",
-				values: ["allowed", "blocked"],
+				currentValue: toolIsKept(tool, effective, config.keepToolOverrides) ? "allowed" : "blocked",
+				values: tool.name === "delegate" ? undefined : ["allowed", "blocked"],
 			}));
 
 			await ctx.ui.custom((tui: any, theme: any, _kb: any, done: any) => {
@@ -588,6 +584,7 @@ ${policyCache.get()}` };
 							return [
 								theme.fg("accent", theme.bold(fit("Orchestrator keep-list"))),
 								...config.keepTools.map((m) => theme.fg("dim", fit(`  · ${m}`))),
+								...Object.entries(config.keepToolOverrides).map(([name, access]) => theme.fg("dim", fit(`  · ${name}: ${access} (override)`))),
 								...(discovered.length > 0 ? ["", theme.fg("accent", fit(discoveredHeader))] : []),
 								...discovered.map((d) => theme.fg("dim", fit(`  - ext:${d.extensionId} (${nameSummary(d.names)})`))),
 								"",
@@ -604,14 +601,20 @@ ${policyCache.get()}` };
 					(id: string, newValue: string) => {
 						const tool = allTools.find((t) => t.name === id);
 						if (!tool || id === "delegate") return; // delegate is always kept
-						if (newValue === "allowed") {
-							if (!toolIsKept(tool, config.keepTools)) config.keepTools.push(id);
-						} else {
-							// Remove every matcher that currently matches this tool
-							config.keepTools = config.keepTools.filter((m) => !matchersForTool(tool, [m]).includes(m));
+						const next = {
+							...config,
+							keepToolOverrides: updateKeepToolOverrides(tool, newValue === "allowed", effective, config.keepToolOverrides),
+						};
+						try {
+							saveConfig(next);
+						} catch (err) {
+							settingsList.updateValue(id, toolIsKept(tool, effective, config.keepToolOverrides) ? "allowed" : "blocked");
+							ctx.ui.notify?.(`Could not save tool access: ${err}`, "error");
+							return;
 						}
-						saveConfig(config);
-						applyReduction();
+						config = next;
+						policyCache.invalidate(); // Explicit permission edits refresh the advertised allow-list.
+						if (engaged) applyReduction();
 					},
 					() => done(undefined),
 				);

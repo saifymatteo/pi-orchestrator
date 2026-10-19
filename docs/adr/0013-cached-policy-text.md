@@ -7,3 +7,9 @@ The delegation policy used to be rebuilt every turn from the live fleet and keep
 - Rebuild every turn (rejected: byte-identical output in the common case; a mid-session fleet/keep-list change silently invalidated the conversation's prompt cache)
 - Literal inject-once at the first turn only (rejected: broken — pi rebuilds the system prompt per turn, so a one-time append disappears from the next turn onward and compliance drifts with no policy in view)
 - One-time message instead of a system-prompt block (rejected: buried under tool results as the conversation grows; salience loss)
+
+## Refinement: explicit permission edits
+
+A successful Allowed/Blocked edit in `/orchestrator-tools` also invalidates the cached text. The user explicitly changed the engaged parent's permissions, so continuing to advertise the previous allow-list would contradict that action. The next engaged turn rebuilds the text from the same permission decision used by the active set and Gate, including per-tool overrides. A failed save changes neither permissions nor the cache.
+
+This deliberately trades prompt-cache stability at the moment of a manual edit for accurate guidance. Ordinary turns and background tool/fleet discovery still do not invalidate the cache; the original episode caching decision otherwise stands.

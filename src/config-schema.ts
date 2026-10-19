@@ -31,6 +31,12 @@ const configDefinition = Type.Object({
 		default: ["delegate"],
 		examples: [[], ["delegate", "hindsight_*", "ext:@luxusai/pi-hindsight"]],
 	}),
+	keepToolOverrides: Type.Record(nonblankString, Type.Enum(["allowed", "blocked"]), {
+		additionalProperties: false,
+		description: "Exact tool-name exceptions to keepTools for the engaged parent, case-insensitive. allowed or blocked overrides the baseline rule; delegate is always allowed. Omitted or {} follows keepTools. Keys are literal names, not globs or ext: matchers. The binary tool editor changes only these exceptions and removes an exception when the selected access matches the baseline. AUTO mode and subagents are unaffected.",
+		default: {},
+		examples: [{ foo_a: "blocked", read: "allowed" }],
+	}),
 	childBlockedTools: Type.Array(nonblankString, {
 		description: "Tool matchers blocked in every subagent: exact names, * / ? globs, or ext:<extension-id>, case-insensitive. [] or omission blocks nothing globally. Per-agent blockTools adds to this floor and cannot re-grant tools. Exact names and * patterns pass to pi's --exclude-tools; other matchers expand parent-side. A child-side tool-call gate is the backstop when this extension loads in the child.",
 		default: [],

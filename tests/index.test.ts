@@ -19,7 +19,7 @@ import {
 	stripDuplicatedParentSegments,
 	withParentPrompt,
 } from "../src/index.ts";
-import { DEFAULT_CONFIG, type DiscoveredTool, type OrchestratorConfig } from "../src/config.ts";
+import { DEFAULT_CONFIG, loadConfig, type OrchestratorConfig } from "../src/config.ts";
 import { buildPolicy } from "../src/policy.ts";
 import type { AgentConfig } from "../src/agents.ts";
 
@@ -383,7 +383,7 @@ test("buildPolicy: deterministic for identical inputs (ADR-0013 cache premise)",
 			filePath: "y.md",
 		},
 	];
-	const kept: DiscoveredTool[] = [{ extensionId: "ext:x", names: ["read"], partial: false }];
+	const kept = ["read"];
 	assert.equal(buildPolicy(agents, kept), buildPolicy(agents, kept));
 });
 
@@ -410,11 +410,11 @@ const LAUNCH_DEFAULT_ACTIVE = ALL_REGISTERED.filter(
 	(n) => !["grep", "find", "ls", "powershell"].includes(n),
 );
 
-function toolsetPi() {
+function toolsetPi(tools?: any[]) {
 	const calls: string[][] = [];
 	const handlers: Record<string, Array<(event: any, ctx: any) => any>> = {};
-	const ALL = ALL_REGISTERED.map((n) => ({ name: n, sourceInfo: { path: `<builtin:${n}>` } }));
-	let active: string[] = [...LAUNCH_DEFAULT_ACTIVE];
+	const ALL = tools ?? ALL_REGISTERED.map((n) => ({ name: n, sourceInfo: { path: `<builtin:${n}>` } }));
+	let active: string[] = LAUNCH_DEFAULT_ACTIVE.filter((name) => ALL.some((tool) => tool.name === name));
 	const stub: any = {
 		on(event: string, handler: (event: any, ctx: any) => any) {
 			(handlers[event] ??= []).push(handler);
@@ -435,9 +435,9 @@ function toolsetPi() {
 
 /** Point getAgentDir() (stubbed) at a temp dir with the given enabled flag;
  *  restore the env afterwards so other tests are unaffected. */
-async function withAgentDir(enabled: boolean, fn: () => Promise<void>): Promise<void> {
+async function withAgentDir(enabled: boolean, fn: () => Promise<void>, settings: Record<string, unknown> = {}): Promise<void> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-orch-auto-norm-"));
-	fs.writeFileSync(path.join(dir, "orchestrator.jsonc"), JSON.stringify({ enabled }));
+	fs.writeFileSync(path.join(dir, "orchestrator.jsonc"), JSON.stringify({ enabled, ...settings }));
 	const prev = process.env.PI_ORCH_TEST_AGENT_DIR;
 	process.env.PI_ORCH_TEST_AGENT_DIR = dir;
 	delete process.env.PI_ORCHESTRATOR_CHILD;
@@ -502,6 +502,157 @@ test("toggle-off via /orchestrator restores extensions + core builtins, not opti
 			assert.ok(!restored.includes(name), `toggle-off must not force-enable optional builtin ${name}`);
 		}
 	});
+});
+
+function editableTools() {
+	return [
+		{ name: "foo_a", sourceInfo: { path: "/extensions/test-ext.ts" } },
+		{ name: "foo_b", sourceInfo: { path: "/extensions/test-ext.ts" } },
+		{ name: "read", sourceInfo: { path: "<builtin:read>" } },
+		{ name: "delegate" },
+	];
+}
+
+async function openToolEditor(handlers: any) {
+	let editor: any;
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+	await handlers.command["orchestrator-tools"]("", {
+		mode: "tui",
+		ui: { custom: async (build: any) => { editor = build({ requestRender() {} }, theme, {}, () => {}); } },
+	});
+	return editor;
+}
+
+test("tool editor: blocking changes only the selected tool, retaining automatic and grouped rules", async () => {
+	for (const keepTools of [[], ["foo_a"], ["foo_*"], ["ext:test-ext"]]) {
+		await withAgentDir(true, async () => {
+			const tools = editableTools();
+			const { stub, handlers } = toolsetPi(tools);
+			(await loadExtension())(stub);
+			await handlers.session_start[0]({}, {});
+			const siblingWasAllowed = stub.getActiveTools().includes("foo_b");
+			const editor = await openToolEditor(handlers);
+			assert.ok(editor.render(80).includes("foo_a: allowed"));
+			editor.handleInput(" ");
+			assert.ok(!stub.getActiveTools().includes("foo_a"), `blocked must block for ${JSON.stringify(keepTools)}`);
+			assert.equal(stub.getActiveTools().includes("foo_b"), siblingWasAllowed);
+			assert.deepEqual(loadConfig().keepTools, keepTools);
+			assert.deepEqual(loadConfig().keepToolOverrides, { foo_a: "blocked" });
+			assert.equal((await handlers.tool_call[0]({ toolName: "foo_a" }, {}))?.block, true);
+			assert.equal((await handlers.tool_call[0]({ toolName: "foo_b" }, {}))?.block === true, !siblingWasAllowed);
+
+			tools.push({ name: "foo_c", sourceInfo: { path: "/extensions/test-ext.ts" } });
+			await handlers.before_agent_start[0]({ systemPrompt: "base" }, {});
+			assert.equal(stub.getActiveTools().includes("foo_c"), siblingWasAllowed, "future matching tools retain their rule");
+
+			// Reopening reflects the saved exception. Allowed restores the baseline, not an explicit matcher.
+			const reopened = await openToolEditor(handlers);
+			assert.ok(reopened.render(80).includes("foo_a: blocked"));
+			reopened.handleInput(" ");
+			assert.ok(stub.getActiveTools().includes("foo_a"));
+			assert.deepEqual(loadConfig().keepToolOverrides, {});
+			assert.deepEqual(loadConfig().keepTools, keepTools);
+		}, { keepTools });
+	}
+});
+
+test("manual permission edits refresh policy text, while ordinary turns remain cached", async () => {
+	await withAgentDir(true, async () => {
+		const { stub, handlers } = toolsetPi(editableTools());
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		const before = await handlers.before_agent_start[0]({ systemPrompt: "base" }, {});
+		assert.match(before.systemPrompt, /retained tools: foo_a, foo_b/);
+		const editor = await openToolEditor(handlers);
+		editor.handleInput(" ");
+		const after = await handlers.before_agent_start[0]({ systemPrompt: "base" }, {});
+		assert.match(after.systemPrompt, /retained tools: foo_b\./);
+		assert.doesNotMatch(after.systemPrompt, /foo_a/);
+		assert.equal((await handlers.before_agent_start[0]({ systemPrompt: "base" }, {})).systemPrompt, after.systemPrompt);
+	}, { keepTools: [] });
+});
+
+test("tool editor: allowing a builtin in auto-keep preserves extension discovery", async () => {
+	await withAgentDir(true, async () => {
+		const { stub, handlers } = toolsetPi(editableTools());
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		const editor = await openToolEditor(handlers);
+		editor.handleInput("\u001b[B");
+		editor.handleInput("\u001b[B");
+		editor.handleInput(" ");
+		assert.deepEqual(loadConfig().keepTools, []);
+		assert.deepEqual(loadConfig().keepToolOverrides, { read: "allowed" });
+		assert.deepEqual(new Set(stub.getActiveTools()), new Set(["foo_a", "foo_b", "read", "delegate"]));
+		assert.equal(await handlers.tool_call[0]({ toolName: "read" }, {}), undefined);
+		assert.match((await handlers.before_agent_start[0]({ systemPrompt: "base" }, {})).systemPrompt, /retained tools: foo_a, foo_b, read/);
+		editor.handleInput(" ");
+		assert.deepEqual(loadConfig().keepToolOverrides, {});
+		assert.ok(!stub.getActiveTools().includes("read"));
+	}, { keepTools: [] });
+});
+
+test("tool overrides survive reload, remain binary, and cannot block delegate", async () => {
+	await withAgentDir(true, async () => {
+		const { stub, handlers } = toolsetPi(editableTools());
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		assert.deepEqual(new Set(stub.getActiveTools()), new Set(["foo_b", "read", "delegate"]));
+		assert.equal((await handlers.tool_call[0]({ toolName: "FOO_A" }, {}))?.block, true);
+		assert.equal(await handlers.tool_call[0]({ toolName: "delegate" }, {}), undefined);
+		const editor = await openToolEditor(handlers);
+		editor.handleInput("\u001b[B");
+		editor.handleInput("\u001b[B");
+		editor.handleInput("\u001b[B");
+		editor.handleInput(" ");
+		assert.ok(editor.render(80).includes("delegate: allowed"));
+	}, { keepTools: [], keepToolOverrides: { FOO_A: "blocked", read: "allowed", delegate: "blocked" } });
+});
+
+test("failed tool-edit save restores the binary control and leaves permissions unchanged", async () => {
+	await withAgentDir(true, async () => {
+		const { stub, handlers, calls } = toolsetPi(editableTools());
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		const editor = await openToolEditor(handlers);
+		const file = path.join(process.env.PI_ORCH_TEST_AGENT_DIR!, "orchestrator.jsonc");
+		fs.rmSync(file);
+		fs.mkdirSync(file); // Force saveConfig to fail without mocking persistence.
+		const beforeCalls = calls.length;
+		editor.handleInput(" ");
+		assert.ok(editor.render(80).includes("foo_a: allowed"));
+		assert.equal(calls.length, beforeCalls);
+		assert.equal(await handlers.tool_call[0]({ toolName: "foo_a" }, {}), undefined);
+	}, { keepTools: [] });
+});
+
+test("a committed tool edit remains applied if legacy cleanup fails", async () => {
+	await withAgentDir(true, async () => {
+		const { stub, handlers } = toolsetPi(editableTools());
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		fs.mkdirSync(path.join(process.env.PI_ORCH_TEST_AGENT_DIR!, "orchestrator.json"));
+		const editor = await openToolEditor(handlers);
+		editor.handleInput(" ");
+		assert.ok(editor.render(80).includes("foo_a: blocked"));
+		assert.ok(!stub.getActiveTools().includes("foo_a"));
+		assert.deepEqual(loadConfig().keepToolOverrides, { foo_a: "blocked" });
+		await handlers.session_start[0]({}, {});
+		assert.equal((await handlers.tool_call[0]({ toolName: "foo_a" }, {}))?.block, true);
+	}, { keepTools: [] });
+});
+
+test("AUTO tool edits persist future engaged permissions without touching current active tools or Gate", async () => {
+	await withAgentDir(false, async () => {
+		const { stub, handlers, calls } = toolsetPi(editableTools());
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, {});
+		const editor = await openToolEditor(handlers);
+		editor.handleInput(" ");
+		assert.equal(calls.length, 0, "editing while AUTO must not trigger toggle-off restoration");
+		assert.equal(await handlers.tool_call[0]({ toolName: "foo_a" }, {}), undefined);
+		assert.deepEqual(loadConfig().keepToolOverrides, { foo_a: "blocked" });
+	}, { keepTools: [] });
 });
 
 test("ENGAGED session_start still reduces to the keep-list (unchanged)", async () => {

@@ -22,6 +22,7 @@ import {
 	saveConfig,
 	toolIsKept,
 	toolMatchesAnyMatcher,
+	updateKeepToolOverrides,
 } from "../src/config.ts";
 
 const packageVersion = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
@@ -80,6 +81,7 @@ test("loadConfig: missing file yields full defaults", () => {
 		assert.deepEqual(config, {
 			enabled: true,
 			keepTools: ["delegate"],
+			keepToolOverrides: {},
 			childBlockedTools: [],
 			childExtensions: [],
 			forwardParentPrompt: true,
@@ -91,6 +93,49 @@ test("loadConfig: missing file yields full defaults", () => {
 			async: true,
 		});
 	});
+});
+
+test("loadConfig: normalizes exact override names and ignores invalid entries", () => {
+	withConfigFile({ keepToolOverrides: { FOO_A: "blocked", read: "allowed", "foo_*": "blocked", invalid: true, other: "allow", " ": "blocked" } }, () => {
+		assert.deepEqual(loadConfig().keepToolOverrides, { foo_a: "blocked", read: "allowed", "foo_*": "blocked" });
+		const config = loadConfig();
+		saveConfig(config);
+		assert.deepEqual(loadConfig().keepToolOverrides, config.keepToolOverrides);
+	});
+	for (const value of [undefined, null, [], "blocked", 42]) {
+		withConfigFile({ keepToolOverrides: value }, () => assert.deepEqual(loadConfig().keepToolOverrides, {}));
+	}
+	withConfigFile(null, () => {
+		loadConfig().keepToolOverrides.foo = "blocked";
+		assert.deepEqual(loadConfig().keepToolOverrides, {}, "default maps must not be shared");
+	});
+});
+
+test("exact override names survive save/load, including whitespace and __proto__", () => {
+	withConfigFile({ keepTools: ["*"], keepToolOverrides: JSON.parse('{"__proto__":"blocked"," foo":"blocked","FOO ":"allowed"}') }, () => {
+		const config = loadConfig();
+		assert.deepEqual(config.keepToolOverrides, JSON.parse('{"__proto__":"blocked"," foo":"blocked","foo ":"allowed"}'));
+		assert.equal(toolIsKept({ name: "__proto__" }, ["*"], config.keepToolOverrides), false);
+		assert.equal(toolIsKept({ name: " foo" }, ["*"], config.keepToolOverrides), false);
+		assert.equal(toolIsKept({ name: "foo" }, ["*"], config.keepToolOverrides), true);
+		saveConfig(config);
+		assert.deepEqual(loadConfig().keepToolOverrides, config.keepToolOverrides);
+	});
+});
+
+test("toolIsKept: exact overrides win matchers, never act as globs, and never block delegate", () => {
+	const overrides = { foo_a: "blocked", read: "allowed", "foo_*": "blocked", delegate: "blocked", constructor: "allowed" } as const;
+	assert.equal(toolIsKept({ name: "foo_a" }, ["foo_*"], overrides), false);
+	assert.equal(toolIsKept({ name: "FOO_A" }, ["foo_*"], overrides), false);
+	assert.equal(toolIsKept({ name: "foo_b" }, ["foo_*"], overrides), true);
+	assert.equal(toolIsKept({ name: "read" }, [], overrides), true);
+	assert.equal(toolIsKept({ name: "delegate" }, [], overrides), true);
+	assert.equal(toolIsKept({ name: "constructor" }, [], overrides), true);
+	assert.equal(toolIsKept({ name: "constructor" }, [], {}), false);
+	assert.equal(toolIsKept({ name: "__proto__" }, [], JSON.parse('{"__proto__":"allowed"}')), true);
+	const updated = updateKeepToolOverrides({ name: "__proto__" }, true, [], {});
+	assert.equal(toolIsKept({ name: "__proto__" }, [], updated), true);
+	assert.equal(Object.getPrototypeOf(updated), Object.prototype);
 });
 
 test("loadConfig: keepTools drops non-string/blank entries", () => {
@@ -356,6 +401,18 @@ test("saveConfig: failed JSONC write retains the original legacy file and its sc
 		fs.mkdirSync(path.join(dir, "orchestrator.jsonc")); // Force the destination write to fail.
 		assert.throws(() => saveConfig(loadConfig()));
 		assert.equal(fs.readFileSync(path.join(dir, "orchestrator.json"), "utf8"), source);
+	});
+});
+
+test("saveConfig: legacy cleanup failure warns without disguising a committed write as a failed save", () => {
+	withConfigFiles({ "orchestrator.jsonc": '{"keepTools":[]}' }, () => {
+		fs.mkdirSync(path.join(process.env.PI_ORCH_TEST_AGENT_DIR!, "orchestrator.json"));
+		const config = loadConfig();
+		config.keepToolOverrides = { foo_a: "blocked" };
+		const warnings = captureWarnings(() => saveConfig(config));
+		assert.deepEqual(loadConfig().keepToolOverrides, { foo_a: "blocked" });
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0], /saved.*legacy/i);
 	});
 });
 
