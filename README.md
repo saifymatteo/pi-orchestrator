@@ -58,7 +58,7 @@ pi-orchestrator tracks child success through the RPC `agent_settled` event; exit
 
 **Dispatch modes.** Dispatch is async by default: single and parallel dispatches (`tasks[]`, max 8) return run ids after admission, while outcomes are submitted to the parent conversation automatically. Accepted means the live session owns the task, not that a Worker has already spawned: work may be queued. The orchestrator stays free to talk or dispatch more work without polling. Pass `async: false` to block until the outcome; it returns in the tool result without a duplicate push. Chains remain blocking and sequential because each step consumes the prior result, and each step uses the same capacity pool as other dispatches.
 
-**Unreleased lifecycle contract ([ADR-0020](docs/adr/0020-live-session-run-lifecycle.md)).** A single owner per live parent session tracks every admitted run from queue through startup, execution, cleanup, terminal outcome, and delivery. The fleet widget is a projection, not a separate registry. Single, parallel, blocking, and chain work share a FIFO pool (default 4 active Workers and 32 queued runs), rather than each parallel call having its own concurrency allowance. A parallel batch is admitted atomically: all tasks must fit in available active and queue capacity before any launches or acceptance, otherwise none is accepted. Lowering limits never kills or evicts already accepted work; active slots remain occupied until runner/process cleanup finishes.
+**Live-session lifecycle contract ([ADR-0020](docs/adr/0020-live-session-run-lifecycle.md)).** A single owner per live parent session tracks every admitted run from queue through startup, execution, cleanup, terminal outcome, and delivery. The fleet widget is a projection, not a separate registry. Single, parallel, blocking, and chain work share a FIFO pool (default 4 active Workers and 32 queued runs), rather than each parallel call having its own concurrency allowance. A parallel batch is admitted atomically: all tasks must fit in available active and queue capacity before any launches or acceptance, otherwise none is accepted. Lowering limits never kills or evicts already accepted work; active slots remain occupied until runner/process cleanup finishes.
 
 Control and discovery actions never launch Workers:
 
@@ -87,14 +87,14 @@ A standard `$schema` reference enables completion, hover documentation, and stri
 
 ```jsonc
 {
-  // Replace <installed-version> with a released version that includes the schema.
-  "$schema": "https://cdn.jsdelivr.net/npm/@saifymatteo/pi-orchestrator@<installed-version>/schemas/orchestrator.schema.json",
+  // Match this version to the installed package.
+  "$schema": "https://cdn.jsdelivr.net/npm/@saifymatteo/pi-orchestrator@0.8.0/schemas/orchestrator.schema.json",
   "keepTools": ["delegate", "hindsight_*"],
   "childBlockedTools": ["hindsight_*"]
 }
 ```
 
-**Unreleased feature:** package version `0.6.0` predates the schema; its public schema URL does not work. The placeholder above is not a working URL: the first schema-bearing release must publish `schemas/orchestrator.schema.json` before its pinned URL can resolve. In a development checkout, use a local reference instead, such as `"$schema": "../schemas/orchestrator.schema.json"` for a config one directory below the checkout root. Adjust the relative path from your config's directory to the checkout's schema; the same path will not generally work in `~/.pi/agent/`.
+Use the schema URL matching your installed package version, shown above for `0.8.0`. In a development checkout, use a local reference instead, such as `"$schema": "../schemas/orchestrator.schema.json"` for a config one directory below the checkout root. Adjust the relative path from your config's directory to the checkout's schema; the same path will not generally work in `~/.pi/agent/`.
 
 Editor diagnostics are **not runtime validation**. Unknown setting names (including typos such as `maxTurn`) are flagged in the editor but remain ignored by the loader and preserved on save. Invalid values such as `maxTurns: 0` get editor diagnostics while retaining the existing runtime fallback behavior. Supported agent-name maps allow arbitrary names; their values and known nested fields are still checked by the editor. Schema `default` annotations document defaults, not instructions to insert them into your file. `$schema` is metadata, not a runtime option.
 
@@ -104,7 +104,7 @@ See [ADR-0019](docs/adr/0019-config-json-schema.md) for the editor/runtime bound
 
 ### Shared Worker capacity
 
-The unreleased lifecycle design adds two optional settings to the shared configuration definition and generated editor schema:
+Two optional settings configure the shared Worker pool:
 
 ```jsonc
 {

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-19
+
 ### Added
 
 - Shared per-session Worker capacity: `maxConcurrency` (default `4`), `maxQueuedRuns` (default `32`, `0` disables queueing), and explicit `retry-delivery` for retained async outcomes without rerunning Workers (ADR-0020).
@@ -193,3 +195,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.1.1...v0.1.2
+[0.8.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.7.0...v0.8.0
