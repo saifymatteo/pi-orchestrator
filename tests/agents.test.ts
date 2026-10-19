@@ -38,7 +38,7 @@ function withUserDir<T>(userRoot: string, fn: () => T): T {
 	}
 }
 
-const baseConfig: import("../src/config.ts").OrchestratorConfig = { enabled: true, keepTools: ["delegate"], keepToolOverrides: {}, childBlockedTools: [], childExtensions: [], forwardParentPrompt: true, builtinFleet: false, modelOverrides: {}, maxTurns: 50, stallTimeoutMs: 600_000, childSessions: true, async: true };
+const baseConfig: import("../src/config.ts").OrchestratorConfig = { enabled: true, keepTools: ["delegate"], keepToolOverrides: {}, childBlockedTools: [], childExtensions: [], forwardParentPrompt: true, builtinFleet: false, modelOverrides: {}, maxTurns: 50, maxConcurrency: 4, maxQueuedRuns: 32, stallTimeoutMs: 600_000, childSessions: true, async: true };
 
 // ── projectAgentDirs ────────────────────────────────────────────────────────
 

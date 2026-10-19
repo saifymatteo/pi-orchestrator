@@ -33,7 +33,7 @@ import {
 	type OrchestratorConfig,
 } from "./config.ts";
 import * as fs from "node:fs";
-import { abortActiveRuns, clearFleetWidget, hasRunningTasks, idleFleetWidgetLines, killAllFleet, registerDelegateTool, type DelegateDeps } from "./delegate.ts";
+import { abortActiveRuns, clearFleetWidget, hasRunningTasks, idleFleetWidgetLines, registerDelegateTool, type DelegateDeps } from "./delegate.ts";
 import { buildPolicy } from "./policy.ts";
 import { truncateToWidth } from "./width.ts";
 import type { AgentConfig } from "./agents.ts";
@@ -284,6 +284,8 @@ export function buildDelegateDeps(getConfig: () => OrchestratorConfig, onIdle: (
 		getCwd: () => process.cwd(),
 		getSignal: () => undefined,
 		getMaxTurns: () => getConfig().maxTurns,
+		getMaxConcurrency: () => getConfig().maxConcurrency,
+		getMaxQueuedRuns: () => getConfig().maxQueuedRuns,
 		getStallTimeoutMs: () => getConfig().stallTimeoutMs,
 		// Global child-side block list (ADR-0007); unioned with per-agent
 		// blockTools inside delegate.ts resolveBlockedTools.
@@ -360,7 +362,7 @@ export default function (pi: any) {
 	function updateIdleWidget(): void {
 		if (!lastUi?.setWidget) return;
 		// Clobber guard: never repaint the (idle) fleet widget while a subagent
-		// is running. onIdle only fires when runningTasks is empty, so idle is
+		// or an unresolved Result is visible. The lifecycle owner guards this, so idle is
 		// never wrongly suppressed — this only defuses stale/extra callers.
 		if (hasRunningTasks()) return;
 		try {
@@ -474,9 +476,9 @@ export default function (pi: any) {
 		// User requirement: never leave fleet agents running in the background.
 		// Mark first so dying runs skip result delivery (no pushes during teardown).
 		abortActiveRuns();
-		killAllFleet();
 		try {
 			if (lastUi) clearFleetWidget(lastUi);
+			lastUi = undefined;
 		} catch {
 			/* ignore */
 		}

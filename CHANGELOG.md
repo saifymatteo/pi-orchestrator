@@ -9,10 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Shared per-session Worker capacity: `maxConcurrency` (default `4`), `maxQueuedRuns` (default `32`, `0` disables queueing), and explicit `retry-delivery` for retained async outcomes without rerunning Workers (ADR-0020).
 - `keepToolOverrides` (default `{}`): case-insensitive exact tool-name exceptions with `allowed` / `blocked` values, applied after the unchanged `keepTools` baseline for the engaged parent only. `delegate` remains always allowed; AUTO mode and Workers are unchanged.
+
+### Changed
+
+- All dispatch modes share one live-session lifecycle owner and FIFO queue, with atomic parallel-batch admission; the widget and status expose queued work and pending or failed delivery. Async insertion requires matching current-parent transcript confirmation, with no automatic blind retries.
 
 ### Fixed
 
+- Accepted runs retain their original id through unexpected runner failure and per-run cancellation, including queued work. Slots remain occupied through cleanup; ESC and teardown stop all accepted work and suppress result pushes.
 - `/orchestrator-tools` now saves binary per-tool choices as overrides instead of rewriting `keepTools`, preserving automatic discovery and group rules for siblings and future tools. Choosing the baseline result removes that tool's override. Successful manual edits refresh the advertised policy; failed saves restore the previous choice without applying new permissions.
 - Successful configuration writes are no longer reported as failed when subsequent legacy-file cleanup fails; cleanup emits a warning instead.
 

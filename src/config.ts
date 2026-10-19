@@ -184,6 +184,8 @@ export function loadConfig(): OrchestratorConfig {
 						)
 					: { ...DEFAULT_CONFIG.modelOverrides },
 			maxTurns: parseMaxTurns(raw.maxTurns) ?? DEFAULT_CONFIG.maxTurns,
+			maxConcurrency: parseSafeInteger(raw.maxConcurrency, 1) ?? DEFAULT_CONFIG.maxConcurrency,
+			maxQueuedRuns: parseSafeInteger(raw.maxQueuedRuns, 0) ?? DEFAULT_CONFIG.maxQueuedRuns,
 			childSessions:
 				typeof raw.childSessions === "boolean" ? raw.childSessions : DEFAULT_CONFIG.childSessions,
 			async: typeof raw.async === "boolean" ? raw.async : DEFAULT_CONFIG.async,
@@ -206,6 +208,11 @@ export function loadConfig(): OrchestratorConfig {
 /** Positive integer or undefined (rejects strings, floats, zero, negatives — no coercion). */
 function parseMaxTurns(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/** Safe integer at or above the minimum, without coercion or an arbitrary upper bound. */
+function parseSafeInteger(value: unknown, minimum: number): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum ? value : undefined;
 }
 
 /** Positive number (floats allowed — ms precision) or undefined (rejects strings,

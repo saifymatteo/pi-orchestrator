@@ -51,20 +51,27 @@ While engaged, the orchestrator parent runs on these layers:
 | Stall watchdog | hard-kills a child silent for `stallTimeoutMs` (default 10 min); any output resets it |
 | Child mode | children self-disable this extension; a parent-PID heartbeat watchdog exits them if pi dies |
 | Child tool gate | children block tools matching `childBlockedTools` / per-agent `blockTools` at spawn (`--exclude-tools`, pi ≥ 1.0.4 patterns) plus a child-side gate backstop |
-| UI | fleet widget above the editor: `⏳ Fleet · <mode> · N running` header plus one line per subagent (agent, turn, ctx load, tokens, task summary); idle line when nothing runs |
+| Lifecycle owner | one live-session owner for async, blocking, and chain runs; shared capacity, queue, outcomes, and delivery state |
+| UI | fleet widget above the editor projects the owner's state: queued/startup/running work and pending or failed result delivery, plus per-Worker progress |
 
 pi-orchestrator tracks child success through the RPC `agent_settled` event; exit codes are informational only.
 
-**Dispatch modes.** Dispatch is async by default: single and parallel dispatches (`tasks[]`, max 8, concurrency 4) return run ids immediately, and each settled result is pushed into the conversation automatically, so the orchestrator never polls and stays free to talk with you or dispatch more work mid-flight. Pass `async: false` to block until the final result. Chains are always blocking because each step consumes the prior result. These control and discovery shapes never spawn anything:
+**Dispatch modes.** Dispatch is async by default: single and parallel dispatches (`tasks[]`, max 8) return run ids after admission, while outcomes are submitted to the parent conversation automatically. Accepted means the live session owns the task, not that a Worker has already spawned: work may be queued. The orchestrator stays free to talk or dispatch more work without polling. Pass `async: false` to block until the outcome; it returns in the tool result without a duplicate push. Chains remain blocking and sequential because each step consumes the prior result, and each step uses the same capacity pool as other dispatches.
 
-- `{action: "list"}`: the live fleet
-- `{action: "status"}`: live runs
-- `{action: "cancel", runId}`: kill one run
-- `{action: "sessions"}`: persistent subagent transcripts
+**Unreleased lifecycle contract ([ADR-0020](docs/adr/0020-live-session-run-lifecycle.md)).** A single owner per live parent session tracks every admitted run from queue through startup, execution, cleanup, terminal outcome, and delivery. The fleet widget is a projection, not a separate registry. Single, parallel, blocking, and chain work share a FIFO pool (default 4 active Workers and 32 queued runs), rather than each parallel call having its own concurrency allowance. A parallel batch is admitted atomically: all tasks must fit in available active and queue capacity before any launches or acceptance, otherwise none is accepted. Lowering limits never kills or evicts already accepted work; active slots remain occupied until runner/process cleanup finishes.
+
+Control and discovery actions never launch Workers:
+
+- `{action: "list"}`: the live fleet; `{action: "sessions"}`: persistent subagent transcripts
+- `{action: "status"}`: queued and active runs, plus pending or failed outcome delivery
+- `{action: "cancel", runId}`: cancel one run, including queued work; its cancelled outcome is still returned or delivered
+- `{action: "retry-delivery", runId}`: explicitly resubmit a retained async outcome, warning that an earlier ambiguous submission may cause duplicates; never reruns the Worker and never resends a confirmed insertion
+
+**Delivery boundary.** Each async outcome gets one automatic submission, retaining its original run id even after an unexpected runner rejection becomes a failed outcome. There are **no automatic blind retries or retry timers**. The extension host's `pi.sendMessage` returns `void` and can hide asynchronous failure: returning from that call is not confirmation. Only a matching `custom_message` observed in the current parent's in-memory transcript confirms insertion; `message_end` alone does not. Until then the outcome remains retained and its pending/failure state is visible in the widget and `status`, with explicit `retry-delivery` available if needed. Confirmation proves transcript insertion, **not model consumption or disk durability**. This is a live-session guarantee only: no restart recovery or exactly-once delivery claim.
 
 **Fleet discovery.** Every `agent` field in the tool schema carries an enum of the fleet discovered at extension load (free-form input when the fleet is empty), so models pick real names instead of inventing plausible ones. The `list` action and the `Unknown agent` error always reflect the fleet as of right now, including agents added mid-session.
 
-**Lifecycle.** ESC and session shutdown kill the whole fleet; a crashed parent's children self-terminate within ~5s via the heartbeat.
+**Lifecycle.** Per-run cancellation produces a cancelled outcome. ESC and session teardown instead stop all accepted work, including queued runs, and suppress result pushes into the interrupted or departed session. A crashed parent's children still self-terminate within ~5s via the heartbeat. Native RPC sub-sessions, turn budgets, stall recovery, and partial outputs are preserved.
 
 Design decisions live in the architecture decision records under `docs/adr/`.
 
@@ -94,6 +101,21 @@ Editor diagnostics are **not runtime validation**. Unknown setting names (includ
 Normal configuration saves (for example, `/orchestrator`) add a missing `$schema` reference or refresh a recognized extension-owned reference to the installed version's pinned URL. Custom schema URLs and comments are preserved, including during legacy-file migration. Existing configs get a reference on their next normal save, or you can add one manually. **Loading never writes files or fetches schemas.** Your editor may fetch or cache the schema; an offline editor or unavailable CDN affects assistance only, not runtime loading. For an unreleased checkout, use the local reference above even if a save inserted a not-yet-published version URL.
 
 See [ADR-0019](docs/adr/0019-config-json-schema.md) for the editor/runtime boundary and publishing decision.
+
+### Shared Worker capacity
+
+The unreleased lifecycle design adds two optional settings to the shared configuration definition and generated editor schema:
+
+```jsonc
+{
+  "maxConcurrency": 4, // positive safe integer: shared active Worker limit
+  "maxQueuedRuns": 32 // nonnegative safe integer: waiting capacity; 0 disables queueing
+}
+```
+
+Both are bounded by JavaScript's maximum safe integer (`9007199254740991`); missing or invalid runtime values fall back to their defaults. `maxQueuedRuns: 0` allows dispatch only when every task can immediately take an active slot. These limits apply across delegate calls and modes in one parent session, not across independent parent sessions. The maximum of 8 tasks in a parallel request is unchanged.
+
+The limits follow the existing configuration lifecycle: loaded at extension initialization and reloaded on `session_start`. Editing the file does not install a live file watcher. Whenever changed limits take effect, already accepted runs remain owned; lowering a limit drains existing work without killing active Workers or evicting queued runs. See [ADR-0020](docs/adr/0020-live-session-run-lifecycle.md) for admission and delivery semantics.
 
 ### Engagement and parent tool access
 
@@ -329,6 +351,10 @@ npm run schema:generate
 ```
 
 Run it again before release and verify that the package includes the artifact, so the installed version's pinned public URL can resolve. Regeneration is an explicit maintainer responsibility; there is no new CI drift gate or workflow. See [ADR-0019](docs/adr/0019-config-json-schema.md).
+
+## Lifecycle verification
+
+The lifecycle change's normal `npm test` command must include run-watcher tests and deterministic fixture-child tests alongside the existing suite. These cover shared admission, queueing, cancellation, cleanup, and delivery confirmation without model calls. Test inclusion and pass results must be verified with the implementation; no test count is promised here.
 
 ## Files
 

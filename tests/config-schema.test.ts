@@ -19,6 +19,14 @@ test("published JSON schema describes defaults and validates editable values wit
 	assert.match(schema.properties.keepTools.description, /auto-keeps/);
 	assert.deepEqual(schema.properties.keepToolOverrides.default, {});
 	assert.equal(schema.properties.maxTurns.default, 50);
+	for (const [key, minimum, fallback] of [["maxConcurrency", 1, 4], ["maxQueuedRuns", 0, 32]] as const) {
+		assert.equal(schema.properties[key].type, "integer");
+		assert.equal(schema.properties[key].minimum, minimum);
+		assert.equal(schema.properties[key].default, fallback);
+		assert.equal(schema.properties[key].maximum, Number.MAX_SAFE_INTEGER, "only the runtime safe-integer limit, not an arbitrary capacity cap");
+		assert.match(schema.properties[key].description, /safe integer/);
+	}
+	assert.match(schema.properties.maxQueuedRuns.description, /0 disables/);
 	assert.equal(schema.properties.stallTimeoutMs.default, 600000);
 	const empty = {};
 	assert.equal(Check(schema, empty), true);
@@ -33,10 +41,17 @@ test("published JSON schema describes defaults and validates editable values wit
 		{ modelOverrides: { "custom-agent": "openrouter/model", "custom\nagent": "provider/model" } },
 		{ builtinFleet: { "custom\nagent": { thinking: "high", hidden: false } } },
 		{ maxTurns: 1, stallTimeoutMs: 0.5, async: false },
+		{ maxConcurrency: 1, maxQueuedRuns: 0 },
+		{ maxConcurrency: 100_000, maxQueuedRuns: 100_000 },
+		{ maxConcurrency: Number.MAX_SAFE_INTEGER, maxQueuedRuns: Number.MAX_SAFE_INTEGER },
 		{ keepTools: ["hindsight_*", "ext:@example/tools", " tool "] },
 	]) assert.equal(Check(schema, valid), true, JSON.stringify(valid));
 	for (const invalid of [
 		{ maxTurn: 7 }, { maxTurns: 0 }, { maxTurns: 1.5 }, { maxTurns: "7" },
+		{ maxConcurrency: 0 }, { maxConcurrency: -1 }, { maxConcurrency: 1.5 }, { maxConcurrency: "4" },
+		{ maxQueuedRuns: -1 }, { maxQueuedRuns: 0.5 }, { maxQueuedRuns: "0" },
+		{ maxConcurrency: null }, { maxQueuedRuns: false },
+		{ maxConcurrency: Number.MAX_SAFE_INTEGER + 1 }, { maxQueuedRuns: Number.MAX_SAFE_INTEGER + 1 },
 		{ stallTimeoutMs: 0 }, { stallTimeoutMs: -1 }, { stallTimeoutMs: "600" },
 		{ enabled: "yes" }, { async: "false" }, { forwardParentPrompt: null }, { childSessions: 1 },
 		{ keepTools: [" "] }, { childBlockedTools: [42] }, { childExtensions: [""] },

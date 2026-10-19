@@ -13,7 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
 
-import { idleFleetWidgetLines, renderFleetLines } from "../src/delegate.ts";
+import { idleFleetWidgetLines, renderFleetLines, runSingleAgent } from "../src/delegate.ts";
 import type { Message } from "@earendil-works/pi-ai";
 import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId, parallelProgress, runStatus, taskStatus, type SingleResult } from "../src/delegate.ts";
 import { buildChildSpawnArgs, expandBlockedToolsToNames, passThroughMatchers, resolveChildExcludeTools, resolveThinkingLevel, stableSessionId } from "../src/delegate.ts";
@@ -624,9 +624,9 @@ test("buildDelegateParams: empty fleet omits the enum (free-form, no empty-enum 
 	}
 });
 
-test("buildDelegateParams: action is enum-constrained to list/sessions/status/cancel", () => {
+test("buildDelegateParams: discovery/control actions include explicit Result retry", () => {
 	const params = buildDelegateParams(FLEET);
-	assert.deepEqual((params.properties.action as any).enum, ["list", "sessions", "status", "cancel"]);
+	assert.deepEqual((params.properties.action as any).enum, ["list", "sessions", "status", "cancel", "retry-delivery"]);
 });
 
 test("agentNameParam: description carries the valid names so models without enum support still see them", () => {
@@ -1037,12 +1037,15 @@ type DispatchHarness = {
 	sendCalls: Array<{ msg: any; opts: any }>;
 	renderers: Array<{ type: string; fn: any }>;
 	idleCalls(): number;
-	execute(params: any): Promise<any>;
+	execute(params: any, signal?: AbortSignal): Promise<any>;
+	emit(event: string, payload?: any): Promise<void>;
+	transcript: any[];
+	widgets: string[][];
 	resolveRun(overrides?: Partial<SingleResult>): void;
 	drain(): Promise<void>;
 };
 
-function dispatchHarness(agents: any[] | null = null, depsOverride: Record<string, unknown> = {}): DispatchHarness {
+function dispatchHarness(agents: any[] | null = null, depsOverride: Record<string, unknown> = {}, host: { holdDelivery?: boolean; sendMessage?: (msg: any) => void } = {}): DispatchHarness {
 	let captured: any;
 	const fleet =
 		agents ??
@@ -1066,6 +1069,10 @@ function dispatchHarness(agents: any[] | null = null, depsOverride: Record<strin
 	const calls: RecordedCall[] = [];
 	const sendCalls: any[] = [];
 	const renderers: Array<{ type: string; fn: any }> = [];
+	const handlers: Record<string, Array<(event: any, ctx: any) => any>> = {};
+	const transcript: any[] = [];
+	const widgets: string[][] = [];
+	const ctx = { sessionManager: { getBranch: () => transcript }, ui: { setWidget: (_id: string, lines: string[]) => widgets.push(lines) } };
 	let idle = 0;
 	const pending = new Map<number, (result: SingleResult) => void>();
 	let nextRunKey = 1;
@@ -1081,9 +1088,14 @@ function dispatchHarness(agents: any[] | null = null, depsOverride: Record<strin
 	registerDelegateTool(
 		{
 			registerTool: (t: any) => (captured = t),
-			sendMessage: (msg: any, opts: any) => sendCalls.push({ msg, opts }),
+			sendMessage: (msg: any, opts: any) => {
+				sendCalls.push({ msg, opts });
+				if (host.sendMessage) return host.sendMessage(msg);
+				if (!host.holdDelivery) transcript.push({ type: "custom_message", ...msg });
+			},
 			registerMessageRenderer: (type: string, fn: any) => renderers.push({ type, fn }),
-			on: () => {},
+			on: (name: string, handler: any) => { (handlers[name] ??= []).push(handler); },
+			getAllTools: () => [],
 		} as any,
 		{
 			getAgents: () => fleet,
@@ -1102,8 +1114,13 @@ function dispatchHarness(agents: any[] | null = null, depsOverride: Record<strin
 		sendCalls,
 		renderers,
 		idleCalls: () => idle,
-		async execute(params: any) {
-			return await captured.execute("call-1", params, undefined, undefined, {});
+		transcript,
+		widgets,
+		async execute(params: any, signal?: AbortSignal) {
+			return await captured.execute("call-1", params, signal, undefined, ctx);
+		},
+		async emit(event: string, payload: any = {}) {
+			for (const handler of handlers[event] ?? []) await handler(payload, ctx);
 		},
 		/** Resolve the oldest unsettled run (dispatch order). */
 		resolveRun(overrides: Partial<SingleResult> = {}) {
@@ -1336,4 +1353,200 @@ test("resolveThinkingLevel: without explicit thinking, the parent level reaches 
 	);
 	assert.equal(resolveThinkingLevel({ thinking: undefined }, { thinkingLevel: "high" }), "high", "model-less: inherits");
 	assert.equal(resolveThinkingLevel({ thinking: undefined }, {}), undefined, "no parent level: pi default");
+});
+
+// ── Shared-owner dispatch and delivery receipts ────────────────────────────
+
+test("async parallel starts four, queues four, and preserves FIFO across dispatch calls", async () => {
+	const h = dispatchHarness();
+	const accepted = await h.execute({ tasks: Array.from({ length: 8 }, (_, i) => ({ agent: "scout", task: `task ${i}` })) });
+	assert.equal(h.calls.length, 4);
+	assert.equal(accepted.details.accepted.filter((r: any) => r.state === "queued").length, 4);
+	await h.execute({ agent: "worker", task: "later dispatch" });
+	assert.equal(h.calls.length, 4);
+	for (let i = 0; i < 9; i++) { h.resolveRun(); await flushD(); }
+	assert.deepEqual(h.calls.map((r) => r.task), [...Array.from({ length: 8 }, (_, i) => `task ${i}`), "later dispatch"]);
+	assert.equal(h.sendCalls.length, 9);
+});
+
+test("configurable concurrency above four is honored, not hard-capped", async () => {
+	const h = dispatchHarness(null, { getMaxConcurrency: () => 6 });
+	await h.execute({ tasks: Array.from({ length: 8 }, (_, i) => ({ agent: "scout", task: String(i) })) });
+	assert.equal(h.calls.length, 6);
+	for (let i = 0; i < 8; i++) { h.resolveRun(); await flushD(); }
+});
+
+test("a parallel batch that exceeds shared remaining capacity is rejected without partial starts", async () => {
+	const h = dispatchHarness(null, { getMaxConcurrency: () => 1, getMaxQueuedRuns: () => 1 });
+	await h.execute({ agent: "scout", task: "already running" });
+	const rejected = await h.execute({ tasks: [{ agent: "scout", task: "a" }, { agent: "worker", task: "b" }] });
+	assert.equal(rejected.isError, true);
+	assert.match(rejected.content[0].text, /capacity exceeded/i);
+	assert.equal(h.calls.length, 1);
+	assert.equal(rejected.details.mode, "parallel");
+	h.resolveRun(); await flushD();
+});
+
+test("blocking dispatch shares async slots and returns its outcome without a second push", async () => {
+	const h = dispatchHarness(null, { getMaxConcurrency: () => 1 });
+	await h.execute({ agent: "scout", task: "async first" });
+	const blocking = h.execute({ agent: "worker", task: "blocking second", async: false });
+	assert.equal(h.calls.length, 1);
+	assert.match((await h.execute({ action: "status" })).content[0].text, /queued/);
+	h.resolveRun(); await flushD();
+	assert.equal(h.calls.length, 2);
+	h.resolveRun();
+	assert.match((await blocking).content[0].text, /recon done/);
+	assert.equal(h.sendCalls.length, 1);
+});
+
+test("chain steps use the shared pool and substitute only the preceding completed output", async () => {
+	const h = dispatchHarness(null, { getMaxConcurrency: () => 1 });
+	await h.execute({ agent: "scout", task: "occupy slot" });
+	const chain = h.execute({ chain: [{ agent: "scout", task: "first" }, { agent: "worker", task: "then {previous}" }] });
+	assert.equal(h.calls.length, 1);
+	h.resolveRun(); await flushD();
+	assert.equal(h.calls[1].task, "first");
+	h.resolveRun({ messages: [{ role: "assistant", content: [{ type: "text", text: "first step output" }] }] as Message[] });
+	await flushD();
+	assert.equal(h.calls[2].task, "then first step output");
+	h.resolveRun();
+	assert.equal((await chain).details.results.length, 2);
+	assert.equal(h.sendCalls.length, 1, "only the unrelated async run pushes");
+});
+
+test("unexpected rejection after Accepted pushes a failed Result with the same run id", async () => {
+	const h = dispatchHarness(null, { runAgent: async () => { throw new Error("prompt tempfile failed"); } });
+	const accepted = await h.execute({ agent: "scout", task: "boot failure" });
+	await flushD();
+	assert.equal(accepted.details.mode, "accepted");
+	assert.equal(h.sendCalls.length, 1);
+	assert.equal(h.sendCalls[0].msg.details.runId, accepted.details.accepted[0].runId);
+	assert.match(h.sendCalls[0].msg.content[0].text, /failed/);
+	assert.match(h.sendCalls[0].msg.content[0].text, /prompt tempfile failed/);
+});
+
+test("unconfirmed delivery stays visible; manual retry never reruns the Worker", async () => {
+	const h = dispatchHarness(null, {}, { holdDelivery: true });
+	const accepted = await h.execute({ agent: "scout", task: "retain outcome" });
+	const id = accepted.details.accepted[0].runId;
+	h.resolveRun(); await flushD();
+	assert.match((await h.execute({ action: "status" })).content[0].text, /delivery-pending/);
+	assert.match(h.widgets.at(-1)![0], /0 running.*delivery pending/);
+	await h.emit("message_end", { message: h.sendCalls[0].msg });
+	await flushD();
+	assert.match((await h.execute({ action: "status" })).content[0].text, /delivery-pending/, "message_end alone is not append confirmation");
+	assert.equal(h.sendCalls.length, 1, "no blind retry after host events");
+	const retry = await h.execute({ action: "retry-delivery", runId: id });
+	assert.equal(retry.isError, undefined);
+	assert.match(retry.content[0].text, /may also arrive/);
+	assert.equal(h.calls.length, 1);
+	assert.equal(h.sendCalls.length, 2);
+	assert.equal(h.sendCalls[0].msg.details.deliveryId, h.sendCalls[1].msg.details.deliveryId);
+	h.transcript.push({ type: "custom_message", ...h.sendCalls[0].msg });
+	await h.emit("agent_settled"); await flushD();
+	assert.match((await h.execute({ action: "status" })).content[0].text, /no live runs/i);
+	assert.equal((await h.execute({ action: "retry-delivery", runId: id })).isError, true);
+	assert.equal(h.sendCalls.length, 2, "confirmed outcomes are not resubmitted");
+});
+
+test("sender throw preserves a visible delivery error rather than dropping the Result", async () => {
+	const h = dispatchHarness(null, {}, { sendMessage: () => { throw new Error("host unavailable"); } });
+	const accepted = await h.execute({ agent: "scout", task: "retain failed push" });
+	h.resolveRun(); await flushD();
+	const status = (await h.execute({ action: "status" })).content[0].text;
+	assert.match(status, /delivery-failed/);
+	assert.match(status, /host unavailable/);
+	await flushD();
+	assert.equal(h.sendCalls.length, 1);
+	assert.equal((await h.execute({ action: "retry-delivery", runId: accepted.details.accepted[0].runId })).isError, undefined);
+	assert.equal(h.calls.length, 1);
+	assert.equal(h.sendCalls.length, 2);
+});
+
+test("queued Cancel delivers cancellation without a process start", async () => {
+	const h = dispatchHarness(null, { getMaxConcurrency: () => 1 });
+	await h.execute({ agent: "scout", task: "running" });
+	const queued = await h.execute({ agent: "worker", task: "queued" });
+	const id = queued.details.accepted[0].runId;
+	await h.execute({ action: "cancel", runId: id });
+	assert.equal(h.calls.length, 1);
+	assert.equal(h.sendCalls[0].msg.details.cancelled, true);
+	assert.equal(h.sendCalls[0].msg.details.runId, id);
+	h.resolveRun(); await flushD();
+	assert.equal(h.calls.length, 1);
+});
+
+test("session teardown suppresses queued/running and retained pushes into the replacement session", async () => {
+	const h = dispatchHarness(null, { getMaxConcurrency: () => 1 }, { holdDelivery: true });
+	await h.execute({ agent: "scout", task: "retained" });
+	h.resolveRun(); await flushD();
+	await h.execute({ agent: "scout", task: "running" });
+	await h.execute({ agent: "worker", task: "queued" });
+	await h.emit("session_shutdown");
+	assert.equal(h.calls[1].killCount, 1);
+	await h.emit("session_start");
+	h.resolveRun(); await flushD();
+	assert.equal(h.calls.length, 2, "queued old-session work never launches");
+	assert.equal(h.sendCalls.length, 1, "old running work cannot push after teardown");
+	assert.match((await h.execute({ action: "status" })).content[0].text, /no live runs/i);
+});
+
+test("blocking AbortSignal stops the same owner, prevents later chain steps, and suppresses pushes", async () => {
+	const h = dispatchHarness();
+	const controller = new AbortController();
+	const chain = h.execute({ chain: [{ agent: "scout", task: "first" }, { agent: "worker", task: "must not start" }] }, controller.signal);
+	controller.abort();
+	assert.equal(h.calls[0].killCount, 1);
+	h.resolveRun();
+	const result = await chain;
+	assert.equal(result.isError, true);
+	assert.equal(h.calls.length, 1);
+	assert.equal(h.sendCalls.length, 0);
+});
+
+test("actual prompt-file write failure after Accepted is delivered and its temporary directory is removed", { timeout: 5000 }, async (t) => {
+	let writtenPath = "";
+	t.mock.method(fs.promises, "writeFile", async (file: any) => {
+		writtenPath = String(file);
+		throw new Error("simulated prompt filesystem failure");
+	});
+	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "owner-write-failure-"));
+	t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+	let receive!: (message: any) => void;
+	const delivered = new Promise<any>((resolve) => { receive = resolve; });
+	const h = dispatchHarness(null, {
+		getCwd: () => directory,
+		runAgent: (options: any) => runSingleAgent({
+			...options,
+			invocation: { command: process.execPath, argsPrefix: [path.resolve("tests/fixtures/rpc-child.mjs"), "success", directory] },
+		}),
+	}, { sendMessage: (message) => { receive(message); } });
+	const accepted = await h.execute({ agent: "scout", task: "fail before process launch" });
+	assert.equal(accepted.details.mode, "accepted");
+	const message = await delivered;
+	assert.equal(message.details.runId, accepted.details.accepted[0].runId);
+	assert.match(message.content[0].text, /simulated prompt filesystem failure/);
+	assert.equal(message.details.results[0].completedNormally, false);
+	assert.ok(writtenPath);
+	assert.equal(fs.existsSync(path.dirname(writtenPath)), false, "failure cleanup removes the directory even before the runner receives its path");
+	assert.equal(fs.existsSync(path.join(directory, "audit.json")), false, "no child was launched");
+});
+
+test("chain admission failure preserves completed outcomes when another dispatch wins the next slot", async () => {
+	const h = dispatchHarness(null, { getMaxConcurrency: () => 1, getMaxQueuedRuns: () => 0 });
+	const chain = h.execute({ chain: [{ agent: "scout", task: "first" }, { agent: "worker", task: "second {previous}" }] });
+	h.resolveRun({ messages: [{ role: "assistant", content: [{ type: "text", text: "FIRST OUTCOME" }] }] as Message[] });
+	// Owner settlement runs first; this admission wins the slot before the
+	// chain's await continuation can admit its next step.
+	const competitor = Promise.resolve().then(() => h.execute({ agent: "worker", task: "competing run" }));
+	const result = await chain;
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /capacity exceeded/i);
+	assert.deepEqual(h.calls.map((call) => call.task), ["first", "competing run"]);
+	assert.equal(result.details.results.length, 1);
+	assert.equal(result.details.results[0].completedNormally, true);
+	assert.equal(result.details.results[0].messages[0].content[0].text, "FIRST OUTCOME");
+	await competitor;
+	h.resolveRun(); await flushD();
 });

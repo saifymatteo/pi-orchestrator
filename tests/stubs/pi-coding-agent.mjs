@@ -15,8 +15,8 @@ export function getMarkdownTheme() {
 	return {};
 }
 
-export function withFileMutationQueue(fn) {
-	return fn;
+export async function withFileMutationQueue(_filePath, fn) {
+	return await fn();
 }
 
 export function getSettingsListTheme() {

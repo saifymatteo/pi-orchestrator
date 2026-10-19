@@ -2,6 +2,12 @@
 
 The `delegate` tool blocks the parent orchestrator for the entire subagent run. During that time the conversation is dead air: pi delivers user steering only after the current assistant turn finishes its tool calls, so a ten-minute worker silences the session for ten minutes, and the orchestrator can neither respond nor re-dispatch. Herdsman solves this by construction — its `delegate` returns "after the task has been atomically recorded", the owner "remains available for other useful work and, for a lead Pi session, continued user interaction", and agent results "resume the session automatically". We adopt that model: dispatch is asynchronous by default, with blocking preserved as an explicit choice.
 
+## Later refinement: live-session ownership (ADR-0020)
+
+[ADR-0020](0020-live-session-run-lifecycle.md) refines the lifecycle and delivery claims below while preserving async-by-default dispatch. Its single live-session owner covers async, blocking, and sequential chain work; the widget projects that owner's state rather than owning a registry. Acceptance may precede spawning because bounded FIFO admission can queue work, and a parallel batch must be admitted atomically before any launch or acceptance.
+
+Post-acceptance failure retains the original run id and an owned terminal outcome. Async delivery is confirmed only by observing the matching `custom_message` in the current parent's in-memory transcript, not by `pi.sendMessage` returning or a generic `message_end`. Unconfirmed outcomes remain visible and retained during the live session. There are no automatic blind retries or retry timers; explicit `retry-delivery` warns of possible duplicates and never reruns a Worker or resends a confirmed insertion. This is not a guarantee of model consumption, disk durability, or restart recovery. Blocking outcomes return only in the tool result; ESC and teardown stop queued as well as active work and suppress pushes. Historical implementation/test statements below describe the original decision, not verification of this refinement.
+
 ## Decision
 
 - **Async is the default.** A dispatch spawns the child, registers the run, and returns an **acceptance** (accepted flag, run id, agent, task) immediately. The orchestrator's turn ends or continues with other work; it never waits.

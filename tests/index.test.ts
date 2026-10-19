@@ -92,6 +92,16 @@ test("buildDelegateDeps: getAsyncDefault reads the live config async key (ADR-00
 	assert.equal(deps.getAsyncDefault?.(), false);
 });
 
+test("buildDelegateDeps: admission limits read the current config", () => {
+	let config = { ...DEFAULT_CONFIG };
+	const deps = buildDelegateDeps(() => config, () => {});
+	assert.equal(deps.getMaxConcurrency?.(), 4);
+	assert.equal(deps.getMaxQueuedRuns?.(), 32);
+	config = { ...config, maxConcurrency: 12, maxQueuedRuns: 0 };
+	assert.equal(deps.getMaxConcurrency?.(), 12);
+	assert.equal(deps.getMaxQueuedRuns?.(), 0);
+});
+
 test("buildDelegateDeps: other config-backed deps also read the live config", () => {
 	let config: OrchestratorConfig = { ...DEFAULT_CONFIG, maxTurns: 10 };
 	const deps = buildDelegateDeps(() => config, () => {});
@@ -460,7 +470,7 @@ test("AUTO session_start leaves the active set untouched (pi's defaultTools gove
 	assert.deepEqual(stub.getActiveTools(), LAUNCH_DEFAULT_ACTIVE, "precondition: pi launch defaults are reduced");
 	await withAgentDir(false, async () => {
 		(await loadExtension())(stub);
-		assert.equal(handlers.session_start?.length, 1);
+		assert.equal(handlers.session_start?.length, 2); // config hook + lifecycle owner
 		await handlers.session_start[0]({}, {});
 		assert.equal(calls.length, 0, "AUTO session_start must not touch the tool set");
 		assert.deepEqual(stub.getActiveTools(), LAUNCH_DEFAULT_ACTIVE);

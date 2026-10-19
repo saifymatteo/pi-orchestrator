@@ -161,6 +161,20 @@
         30
       ]
     },
+    "maxConcurrency": {
+      "type": "integer",
+      "description": "Maximum concurrently running subagents in the live session. Must be a positive safe integer; invalid runtime values fall back to the default without coercion.",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "default": 4
+    },
+    "maxQueuedRuns": {
+      "type": "integer",
+      "description": "Maximum subagent runs waiting for a concurrency slot in the live session. 0 disables the waiting queue. Must be a nonnegative safe integer; invalid runtime values fall back to the default without coercion.",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "default": 32
+    },
     "stallTimeoutMs": {
       "type": "number",
       "description": "Subagent wall-clock stall timeout in milliseconds. Any stdout activity resets it; a silent child is hard-killed with stall-timeout and partial output preserved. Any positive finite number (including decimals); there is no disable switch—use a huge value instead. Invalid runtime values fall back to the default without coercion.",

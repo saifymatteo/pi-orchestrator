@@ -14,19 +14,37 @@ A subagent: a fresh child `pi` process with an isolated context window and the f
 The set of agent definitions the Orchestrator can delegate to. Shipped fleet: **scout** (read-only recon), **planner** (read-only planning), **worker** (general-purpose, full tools), **reviewer** (read-only + shell, code review). Builtins ship as markdown files with YAML frontmatter in the extension's own `agents/` directory; user-installed agents live in `~/.pi/agent/agents/`.
 
 ### Delegate (tool)
-The single tool the Orchestrator uses to hand work to the Fleet. Modes: single (`agent` + `task`), parallel (`tasks[]`), chain (`chain[]` with `{previous}` placeholder), and discovery (`{action: "list"}` returns the live fleet, `{action: "sessions"}` lists the session's subagent transcripts, `{action: "status"}` lists live runs, `{action: "cancel"}` kills one run). Dispatch is asynchronous by default (see ADR-0014): the call returns an Accepted result at once, and the outcome follows via Result delivery when the Worker settles; `async: false` blocks until the final result, and chain mode is always blocking. Agent names are published as a schema enum of the fleet discovered at load (see ADR-0010). Always active, never blocked.
+The tool for handing work to the Fleet, singly, in parallel, or as a chain of dependent steps. It also provides discovery and controls for runs and Result delivery.
+
+### Run
+One admitted task with a stable identity, whether waiting for capacity, executing in a Worker, or awaiting Result delivery. A Run is distinct from its Worker: an accepted Run need not have a Worker yet.
 
 ### Accepted
-The immediate result of an asynchronous delegate dispatch: confirmation, with a run id, that the task was taken — before any work has finished. Distinct from the task's eventual outcome, which arrives later via Result delivery. A synchronous validation error (unknown agent, invalid parameters) is never an acceptance.
+Confirmation that the live parent session has taken responsibility for a Run, including one waiting for capacity. Distinct from starting a Worker, completing the task, or delivering its outcome.
 
 ### Run id
-The unique identifier a delegate dispatch receives at acceptance. Every later signal about that dispatch — a delivered result, a status listing, a cancel — echoes the same id, so acceptance and delivery stay correlated across turns.
+The unique identity of a Run, shared by its acceptance, progress, outcome, cancellation, and Result delivery attempts.
+
+### Live-session owner
+The authority responsible for admitted Runs and their outcomes within one parent session's lifetime. Distinct from the Fleet status view and from the Worker carrying out a task.
+
+### Queued run
+An accepted Run waiting for Worker capacity. It has not started a Worker.
+
+### Terminal outcome
+The final success, failure, or cancellation of a Run. Distinct from Delivery state: a task can be finished while its outcome still awaits delivery.
+
+### Delivery state
+Whether an async Run's Terminal outcome is awaiting submission or confirmation, has a reported submission failure, or has confirmed insertion into the parent conversation. Confirmation does not imply that the model has consumed the outcome or that it is durable on disk.
 
 ### Result delivery
-The push of a settled Worker's outcome into the Orchestrator's conversation: it starts a new turn when the Orchestrator is idle and joins the queue when it is mid-conversation. A delivery carries the three-state run status (see ADR-0012); failure after acceptance is delivered, never silent. The Orchestrator reacts to deliveries; it does not poll for them.
+The submission of an async Run's Terminal outcome to its parent conversation, correlated by Run id. A blocking Run instead returns its outcome in its tool result.
+
+### Delivery retry
+An explicit request to resubmit a retained outcome whose insertion is unconfirmed, with possible duplicate delivery. It never repeats the Worker's task.
 
 ### Cancel
-The explicit kill of one running delegation, as distinct from aborting the session, which kills the whole fleet. A cancelled run's transcript still lands in its Sub-session record.
+The explicit stop of one accepted Run, including a Queued run, producing a cancelled Terminal outcome. Distinct from stopping the entire session and suppressing result pushes.
 
 ### Sub-session (persistent subagent session)
 The persistent pi session each delegate dispatch writes for its subagent (ADR-0011). File-per-run, stored in the parent's session directory, named `orch: <agent> — <task>`, and linked to the parent session via pi's session-format v3 `parentSession` header (written by the parent's RPC `new_session {parentSession}` before the task prompt). The delegate result ends with the session path; `delegate({action: "sessions"})` lists all of them from disk. Config: `childSessions` (default `true`).
@@ -68,4 +86,4 @@ The reasoning effort a Worker runs with, from `off` to `max`. Independent of the
 An external package (e.g. `@aliou/pi-guardrails`) that gates dangerous tool calls. The orchestrator does not ship or configure one; users install it themselves, and child pi processes inherit it automatically through pi's own extension discovery (see ADR-0005).
 
 ### Fleet status (widget)
-The persistent UI panel above the editor showing live subagent progress for the whole fleet. While any Worker runs it renders as a group: a header with the dispatch mode (`single`, `parallel`, `chain`, or `mixed`) and the running count, followed by one indented line per running Worker — agent name, current turn, context load, tokens (input/output), and a truncated task summary. When nothing runs, a single idle line shows the engaged orchestrator and fleet names. Cost appears in the result renderers, not the live widget.
+The parent session's view of queued and active Runs, Worker progress, and pending or failed Result delivery. A projection of the Live-session owner's state, not an independent authority over Runs.

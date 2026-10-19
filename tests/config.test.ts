@@ -58,6 +58,54 @@ test("loadConfig: maxTurns accepts a positive integer", () => {
 	});
 });
 
+test("loadConfig: run limits default when omitted and reject invalid values without coercion", () => {
+	for (const [key, fallback] of [["maxConcurrency", 4], ["maxQueuedRuns", 32]] as const) {
+		withConfigFile({}, () => assert.equal(loadConfig()[key], fallback));
+		for (const bad of ["7", "", true, false, null, [], {}, -1, -0.5, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+			// JSON.stringify encodes NaN/Infinity as null; overflow literals below
+			// additionally exercise non-finite numbers produced by the JSONC parser.
+			withConfigFile({ enabled: false, [key]: bad }, () => {
+				const config = loadConfig();
+				assert.equal(config[key], fallback, `${key}=${String(bad)}`);
+				assert.equal(config.enabled, false, "invalid limits must not reset other settings");
+			});
+		}
+		for (const literal of ["1e400", "-1e400"]) {
+			withConfigFiles({ "orchestrator.jsonc": `{"enabled":false,"${key}":${literal}}` }, () => {
+				assert.equal(loadConfig()[key], fallback);
+				assert.equal(loadConfig().enabled, false);
+			});
+		}
+	}
+	withConfigFile({ maxConcurrency: 0 }, () => assert.equal(loadConfig().maxConcurrency, 4));
+});
+
+test("loadConfig: run limits accept safe integers up to MAX_SAFE_INTEGER and queue zero", () => {
+	for (const value of [1, 100_000, Number.MAX_SAFE_INTEGER]) {
+		withConfigFile({ maxConcurrency: value, maxQueuedRuns: value }, () => {
+			assert.equal(loadConfig().maxConcurrency, value);
+			assert.equal(loadConfig().maxQueuedRuns, value);
+		});
+	}
+	withConfigFile({ maxQueuedRuns: 0 }, () => assert.equal(loadConfig().maxQueuedRuns, 0));
+});
+
+test("saveConfig: run limits survive comment-preserving round trips, including a disabled queue", () => {
+	withConfigFiles({ "orchestrator.jsonc": '{\n// preserve this comment\n"maxTurns": 20\n}' }, () => {
+		for (const maxQueuedRuns of [0, 64, Number.MAX_SAFE_INTEGER]) {
+			const config = loadConfig();
+			config.maxConcurrency = Number.MAX_SAFE_INTEGER;
+			config.maxQueuedRuns = maxQueuedRuns;
+			saveConfig(config);
+			assert.deepEqual(loadConfig(), config);
+			const saved = fs.readFileSync(path.join(process.env.PI_ORCH_TEST_AGENT_DIR!, "orchestrator.jsonc"), "utf8");
+			assert.match(saved, /preserve this comment/);
+			assert.equal(jsonc.parse(saved).maxConcurrency, Number.MAX_SAFE_INTEGER);
+			assert.equal(jsonc.parse(saved).maxQueuedRuns, maxQueuedRuns);
+		}
+	});
+});
+
 test("loadConfig: stallTimeoutMs rejects '600' (string), -1 and 0, falls back to default 600000", () => {
 	for (const bad of ["600", -1, 0, Infinity, NaN]) {
 		withConfigFile({ stallTimeoutMs: bad }, () => {
@@ -88,6 +136,8 @@ test("loadConfig: missing file yields full defaults", () => {
 			builtinFleet: true,
 			modelOverrides: {},
 			maxTurns: 50,
+			maxConcurrency: 4,
+			maxQueuedRuns: 32,
 			stallTimeoutMs: 600000,
 			childSessions: true,
 			async: true,

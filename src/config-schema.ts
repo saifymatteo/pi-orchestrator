@@ -67,6 +67,18 @@ const configDefinition = Type.Object({
 		default: 50,
 		examples: [30],
 	}),
+	maxConcurrency: Type.Integer({
+		description: "Maximum concurrently running subagents in the live session. Must be a positive safe integer; invalid runtime values fall back to the default without coercion.",
+		minimum: 1,
+		maximum: Number.MAX_SAFE_INTEGER,
+		default: 4,
+	}),
+	maxQueuedRuns: Type.Integer({
+		description: "Maximum subagent runs waiting for a concurrency slot in the live session. 0 disables the waiting queue. Must be a nonnegative safe integer; invalid runtime values fall back to the default without coercion.",
+		minimum: 0,
+		maximum: Number.MAX_SAFE_INTEGER,
+		default: 32,
+	}),
 	stallTimeoutMs: Type.Number({
 		description: "Subagent wall-clock stall timeout in milliseconds. Any stdout activity resets it; a silent child is hard-killed with stall-timeout and partial output preserved. Any positive finite number (including decimals); there is no disable switch—use a huge value instead. Invalid runtime values fall back to the default without coercion.",
 		exclusiveMinimum: 0,
