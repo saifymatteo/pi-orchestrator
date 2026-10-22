@@ -20,7 +20,7 @@ Per-run cancellation applies to queued, starting, and running work and produces 
 
 Native RPC sub-sessions and their on-disk discovery remain as in [ADR-0011](0011-persistent-sub-sessions.md). Preserve turn budgets, stall enforcement, partial outputs, and the child-side parent-death guard. A queued run has no child transcript yet, and a child killed before pi materializes its session may have none; this design does not invent transcripts for those cases.
 
-## Shared wait refinement (ADR-0021)
+## Event-bus integration refinement (ADR-0021)
 
 [ADR-0021](0021-shared-wait-agent-leases.md) extends this same owner with atomic result leases. Busy or claimed outcomes are held; successful committed handoff consumes them instead of native insertion. Boundary drafts remain retained until branch receipts, and parent Escape/teardown still cancels claimed work. The delivery guarantees below otherwise remain unchanged.
 

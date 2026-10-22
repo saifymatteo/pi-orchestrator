@@ -1,6 +1,6 @@
-# Shared wait leases held agent results without changing fleet lifetime
+# Event-bus result leases preserve agent fleet lifetime
 
-Shared wait is now explicitly approved. This supersedes ADR-0014's rejection of a wait action as redundant: a shared consumer can await agent and shell work together, while blocking dispatch remains available. The consumer discovers the session's agent producer synchronously through `async-work:providers:v1`; the existing live-session owner in ADR-0020 owns claims, execution promises, retained outcomes, and delivery. There is no second execution registry or delegate wait action.
+Other extensions can collect agent results through a session-scoped provider without a direct package dependency. This extends ADR-0014's dispatch model: a consumer can combine agent outcomes with other compatible sources, while blocking dispatch remains available. The consumer discovers the session's agent producer synchronously through the `async-work:providers:v1` event-bus protocol; the existing live-session owner in ADR-0020 owns claims, execution promises, retained outcomes, and delivery. There is no second execution registry or additional delegate action.
 
 ## Handoff and fallback
 
@@ -10,8 +10,8 @@ Async outcomes are held while the parent is busy or the run is claimed. At a com
 
 ## Cancellation is not keep-alive
 
-Escape in shared wait still cancels the fleet through the existing parent-abort policy. Session teardown does the same. Leases do **not** shield agents from `abortAll`. Only a wait timeout or independent consumer cancellation releases ownership without cancelling agent execution. Detached shell jobs have their own provider/lifetime policy and are outside this decision.
+Escape while an extension consumer holds a lease still cancels the fleet through the existing parent-abort policy. Session teardown does the same. Leases do **not** shield agents from `abortAll`. Only a consumer timeout or independent consumer cancellation releases ownership without cancelling agent execution. Detached shell jobs have their own provider/lifetime policy and are outside this decision.
 
 ## Runtime boundary
 
-The supported integration uses public Pi 1.3.0 lifecycle and extension event APIs, with no private queues or targeted withdrawal. The producer does not install a shared wait tool: its consumer must be loaded separately in the same parent session. No dependency upgrade, restart recovery, disk-durability guarantee, or exactly-once guarantee across an ambiguous native submission is included.
+The supported integration uses public Pi 1.3.0 lifecycle and extension event APIs, with no private queues or targeted withdrawal. The producer exposes an event-bus integration point; any compatible consumer extension can use it when loaded in the same parent session. No dependency upgrade, restart recovery, disk-durability guarantee, or exactly-once guarantee across an ambiguous native submission is included.

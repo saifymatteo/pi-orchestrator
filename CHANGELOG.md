@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Session-scoped agent producer for shared wait: atomic result leases support mixed-source consumers without another run registry. Timeout/independent cancellation releases ownership; parent Escape and teardown still cancel the fleet (ADR-0021).
+- Session-scoped agent producer exposed through the `async-work:providers:v1` event-bus protocol: atomic result leases let other extensions collect outcomes without another run registry. Timeout/independent cancellation releases ownership; parent Escape and teardown still cancel the fleet (ADR-0021).
 
 ### Changed
 
-- Async agent outcomes remain held while the parent is busy or a shared wait owns them. Completed pre-settle boundaries append result drafts without replacing existing work; positive branch receipts or committed handoff consume outcomes, with a one-shot true-idle fallback for late completions and missing boundary drafts.
+- Reorganize documentation into a quickstart README and focused configuration, usage, custom-agent, and development guides.
+- Async agent outcomes remain held while the parent is busy or an extension consumer owns them. Completed pre-settle boundaries append result drafts without replacing existing work; positive branch receipts or committed handoff consume outcomes, with a one-shot true-idle fallback for late completions and missing boundary drafts.
 
 ## [0.8.0] - 2026-10-19
 

@@ -18,15 +18,15 @@ Post-acceptance failure retains the original run id and an owned terminal outcom
 - **Child lifecycle decouples from the tool-call AbortSignal.** Today the delegate call's abort signal doubles as a child-lifecycle handle; under async the tool call ends before the children do. Abort handling therefore stays where it already belongs — the session level: ESC and session shutdown invoke the fleet kill (SIGTERM with SIGKILL escalation after 3s), unchanged.
 - **Crash safety is child-side and untouched.** Children self-terminate within 5 seconds of parent death via the ppid heartbeat watchdog (index.ts) — SIGKILL-proof, because a crashed parent gets no cleanup callback. Accepted theoretical limit: PID reuse within the 5-second probe window defeats one probe. Stdin EOF is not usable as a death signal (RPC children are spawned with all three stdio pipes open), which is why the heartbeat exists.
 
-## Later refinement: shared wait (ADR-0021)
+## Later refinement: event-bus integration (ADR-0021)
 
-[ADR-0021](0021-shared-wait-agent-leases.md) supersedes the wait rejection below: the user approved shared mixed-source waiting through session-scoped result leases, preserving async defaults and parent-abort fleet cancellation.
+[ADR-0021](0021-shared-wait-agent-leases.md) adds a session-scoped event-bus provider so other extensions can collect agent results through leases, preserving async defaults and parent-abort fleet cancellation.
 
 ## Considered options
 
 - **Opt-in async parameter, blocking default** (the round-1 recommendation): rejected by product decision — it keeps the pain as the default and forks the tool-result shape in the common case instead of the escape hatch.
 - **Always-async, push-only, no blocking mode**: rejected — quick lookups whose result integrates immediately are legitimately better in-hand; `async: false` preserves that cheaply, so blocking survives as a choice rather than disappearing.
-- **Wait action (`{action: "wait"}`) under always-async**: rejected as redundant once blocking survives as `async: false`.
+- **Additional blocking action under always-async**: rejected as redundant once blocking survives as `async: false`.
 
 ## Consequences
 
