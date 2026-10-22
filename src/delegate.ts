@@ -1693,18 +1693,22 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 
 	let sessionContext: any;
 	let sessionEpoch = 0;
+	function resultMessage(delivery: RunDelivery) {
+		return {
+			customType: RUN_RESULT_MESSAGE_TYPE,
+			content: [{ type: "text" as const, text: deliveryText(delivery) }],
+			display: true,
+			details: {
+				mode: "single" as const, results: [delivery.result], runId: delivery.runId,
+				deliveryId: delivery.deliveryId, cancelled: delivery.cancelled,
+			} satisfies SubagentDetails,
+		};
+	}
 	const watcher = createRunWatcher({
+		canDeliver: () => sessionContext?.isIdle?.() === true,
 		deliver: (delivery) => {
 			if (typeof pi.sendMessage !== "function") throw new Error("Host Result sender unavailable.");
-			const returned = pi.sendMessage({
-				customType: RUN_RESULT_MESSAGE_TYPE,
-				content: [{ type: "text", text: deliveryText(delivery) }],
-				display: true,
-				details: {
-					mode: "single", results: [delivery.result], runId: delivery.runId,
-					deliveryId: delivery.deliveryId, cancelled: delivery.cancelled,
-				} satisfies SubagentDetails,
-			}, { triggerTurn: true, deliverAs: "followUp" });
+			const returned = pi.sendMessage(resultMessage(delivery), { triggerTurn: true, deliverAs: "followUp" });
 			scheduleReceiptCheck(sessionContext);
 			return returned;
 		},
@@ -1735,6 +1739,49 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 		// this one-shot check may confirm insertion; absence never triggers resend.
 		setImmediate(() => { if (epoch === sessionEpoch) confirmReceipts(ctx); });
 	}
+	// Synchronous discovery: the consumer receives a session-bound producer, not a second registry.
+	pi.events?.on("async-work:providers:v1", (request: any) => {
+		const ctx = sessionContext;
+		const file = ctx?.sessionManager?.getSessionFile?.();
+		if (!ctx || request?.sessionFile !== file || typeof request.add !== "function") return;
+		const epoch = sessionEpoch;
+		request.add({
+			source: "agent",
+			claim(ids: number[], owner: string) {
+				if (epoch !== sessionEpoch) throw new Error("Agent provider belongs to a stale session.");
+				const lease = watcher.claim(ids, owner);
+				return {
+					result: lease.result.then((outcomes) => {
+						if (epoch !== sessionEpoch) throw new Error("Agent lease belongs to a stale session.");
+						return outcomes.map((outcome) => ({
+							source: "agent", id: outcome.runId, content: deliveryText(outcome),
+							details: resultMessage(outcome).details,
+						}));
+					}),
+					commit: lease.commit, release: lease.release,
+				};
+			},
+		});
+	});
+	pi.on?.("agent_before_settle", (event: any, ctx: any) => {
+		sessionContext = ctx;
+		confirmReceipts(ctx);
+		if (event.outcome !== "completed") return;
+		const drafts = watcher.offer().map((delivery) => ({ type: "custom_message", ...resultMessage(delivery) }));
+		if (drafts.length) return { entries: [...event.entries, ...drafts], continue: true };
+	});
+	pi.on?.("agent_settled", (_event: any, ctx: any) => {
+		const epoch = sessionEpoch;
+		// Notification-only hook: wait until the host has finished its lifecycle.
+		setImmediate(() => {
+			if (epoch !== sessionEpoch) return;
+			confirmReceipts(ctx);
+			// A later boundary handler may have replaced our offered drafts. Only
+			// after final settlement/receipt inspection are missing offers eligible again.
+			watcher.finishBoundary();
+			watcher.flush();
+		});
+	});
 	for (const event of ["message_end", "turn_end", "agent_settled"]) {
 		pi.on?.(event, (_event: any, ctx: any) => scheduleReceiptCheck(ctx));
 	}

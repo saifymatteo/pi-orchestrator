@@ -461,3 +461,72 @@ test("a failed older delivery attempt cannot overwrite a newer pending attempt",
 	assert.equal(attempts, 2);
 	assert.equal(h.watcher.entries()[0].state, "delivery-pending");
 });
+
+test("claims validate the entire batch before taking ownership, including malformed and blocking ids", async () => {
+	const h = makeWatcher({ canDeliver: () => false });
+	const a = h.startManual({ runId: 1 });
+	const b = h.startManual({ runId: 2 });
+	const blocking = h.watcher.start({ runId: 3, agent: "worker", task: "blocking", mode: "single", widgetKey: "blocking", pushResult: false, start: async () => makeResult() });
+	for (const ids of [[], [1, 1], [0], [1.5], [1, 99], [1, 3], [1, , 2] as number[]]) assert.throws(() => h.watcher.claim(ids, "owner"));
+	assert.throws(() => h.watcher.claim([1], " "));
+	const lease = h.watcher.claim([2], "first");
+	assert.throws(() => h.watcher.claim([1, 2], "conflict"), /claimed/);
+	const untouched = h.watcher.claim([1], "second");
+	a.settle(); b.settle(); await Promise.all([lease.result, untouched.result, blocking.result]);
+	lease.commit(); untouched.commit();
+	assert.equal(h.watcher.entries().length, 0);
+	assert.equal(h.deliveries.length, 0);
+});
+
+test("lease commit/release are nonthrowing and idempotent; early commit preserves unfinished results", async () => {
+	let idle = false;
+	const h = makeWatcher({ canDeliver: () => { if (!idle) throw new Error("host unavailable"); return true; } });
+	const a = h.startManual();
+	const lease = h.watcher.claim([a.runId], "owner");
+	assert.doesNotThrow(() => lease.commit());
+	assert.equal(h.watcher.entries().length, 1);
+	assert.throws(() => h.watcher.claim([a.runId], "other"), /claimed/);
+	a.settle(); await lease.result;
+	assert.doesNotThrow(() => { lease.commit(); lease.release(); lease.commit(); });
+	assert.equal(h.watcher.entries().length, 0);
+	const b = h.startManual();
+	const released = h.watcher.claim([b.runId], "release");
+	b.settle(); await released.result;
+	assert.doesNotThrow(() => { released.release(); released.release(); released.commit(); });
+	assert.equal(h.deliveries.length, 0);
+	idle = true; h.watcher.flush(); h.watcher.flush();
+	assert.equal(h.deliveries.length, 1);
+});
+
+test("held completions may be claimed; release restores eligibility without cancelling execution", async () => {
+	let idle = false;
+	const h = makeWatcher({ canDeliver: () => idle });
+	const a = h.startManual();
+	a.settle(); await flush();
+	const lease = h.watcher.claim([a.runId], "held");
+	const result = await lease.result;
+	assert.equal(result[0].runId, a.runId);
+	idle = true; h.watcher.flush();
+	assert.equal(h.deliveries.length, 0);
+	assert.equal(h.watcher.retryDelivery(a.runId).ok, false);
+	lease.release();
+	assert.equal(a.killCalls().length, 0);
+	assert.equal(h.deliveries.length, 1);
+	assert.throws(() => h.watcher.claim([a.runId], "late"), /submitted/);
+	h.watcher.flush();
+	assert.equal(h.deliveries.length, 1);
+});
+
+test("stale lease cleanup cannot consume a new run reusing an aborted id", async () => {
+	const h = makeWatcher({ canDeliver: () => false });
+	const old = h.startManual({ runId: 1 });
+	const stale = h.watcher.claim([1], "old");
+	h.watcher.abortAll();
+	assert.equal(old.killCalls().length, 1);
+	old.settle(); await stale.result;
+	const next = h.startManual({ runId: 1 });
+	stale.commit(); stale.release();
+	const fresh = h.watcher.claim([1], "fresh");
+	next.settle(); await fresh.result; fresh.commit();
+	assert.equal(h.watcher.entries().length, 0);
+});

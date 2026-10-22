@@ -1039,7 +1039,9 @@ type DispatchHarness = {
 	renderers: Array<{ type: string; fn: any }>;
 	idleCalls(): number;
 	execute(params: any, signal?: AbortSignal): Promise<any>;
-	emit(event: string, payload?: any): Promise<void>;
+	emit(event: string, payload?: any): Promise<any>;
+	ctx: any;
+	discover(sessionFile?: string): any;
 	transcript: any[];
 	widgets: string[][];
 	resolveRun(overrides?: Partial<SingleResult>): void;
@@ -1073,7 +1075,8 @@ function dispatchHarness(agents: any[] | null = null, depsOverride: Record<strin
 	const handlers: Record<string, Array<(event: any, ctx: any) => any>> = {};
 	const transcript: any[] = [];
 	const widgets: string[][] = [];
-	const ctx = { sessionManager: { getBranch: () => transcript }, ui: { setWidget: (_id: string, lines: string[]) => widgets.push(lines) } };
+	const bus: Record<string, (request: any) => void> = {};
+	const ctx = { isIdle: () => true, sessionManager: { getBranch: () => transcript, getSessionFile: () => "parent.jsonl" }, ui: { setWidget: (_id: string, lines: string[]) => widgets.push(lines) } };
 	let idle = 0;
 	const pending = new Map<number, (result: SingleResult) => void>();
 	let nextRunKey = 1;
@@ -1088,6 +1091,7 @@ function dispatchHarness(agents: any[] | null = null, depsOverride: Record<strin
 	};
 	registerDelegateTool(
 		{
+			events: { on: (name: string, handler: any) => { bus[name] = handler; } },
 			registerTool: (t: any) => (captured = t),
 			sendMessage: (msg: any, opts: any) => {
 				sendCalls.push({ msg, opts });
@@ -1118,10 +1122,18 @@ function dispatchHarness(agents: any[] | null = null, depsOverride: Record<strin
 		transcript,
 		widgets,
 		async execute(params: any, signal?: AbortSignal) {
-			return await captured.execute("call-1", params, signal, undefined, ctx);
+			return await captured.execute("call-1", params, signal, undefined, { ...ctx, isIdle: () => ctx.isIdle() });
+		},
+		ctx,
+		discover(sessionFile = "parent.jsonl") {
+			let provider: any;
+			bus["async-work:providers:v1"]?.({ sessionFile, add: (value: any) => { provider = value; } });
+			return provider;
 		},
 		async emit(event: string, payload: any = {}) {
-			for (const handler of handlers[event] ?? []) await handler(payload, ctx);
+			let result;
+			for (const handler of handlers[event] ?? []) result = await handler(payload, { ...ctx, isIdle: () => ctx.isIdle() }) ?? result;
+			return result;
 		},
 		/** Resolve the oldest unsettled run (dispatch order). */
 		resolveRun(overrides: Partial<SingleResult> = {}) {
@@ -1570,3 +1582,119 @@ test("chain admission failure preserves completed outcomes when another dispatch
 	await competitor;
 	h.resolveRun(); await flushD();
 });
+
+test("shared wait discovery and committed group handoff survive fresh hook contexts", async () => {
+	const h = dispatchHarness();
+	assert.equal(h.discover(), undefined);
+	await h.emit("session_start");
+	assert.equal(h.discover("other.jsonl"), undefined);
+	const provider = h.discover();
+	assert.equal(provider.source, "agent");
+	const accepted = await h.execute({ tasks: [{ agent: "scout", task: "one" }, { agent: "worker", task: "two" }] });
+	const ids = accepted.details.accepted.map((run: any) => run.runId);
+	const lease = provider.claim(ids, "wait:test");
+	h.resolveRun(); h.resolveRun({ exitCode: 1, completedNormally: false, errorMessage: "fixture failure" });
+	const results = await lease.result;
+	assert.deepEqual(results.map((result: any) => result.id), ids);
+	for (const result of results) {
+		assert.deepEqual(Object.keys(result).sort(), ["content", "details", "id", "source"]);
+		assert.equal(result.source, "agent");
+		assert.equal(typeof result.content, "string");
+		assert.equal(typeof result.details, "object");
+	}
+	assert.equal(results[1].details.results[0].completedNormally, false);
+	lease.commit(); lease.commit(); lease.release();
+	await h.drain();
+	assert.equal(h.sendCalls.length, 0);
+	assert.match((await h.execute({ action: "status" })).content[0].text, /no live runs/);
+});
+
+test("busy outcomes append to boundary entries despite false pre-draft canContinue and await a receipt", async () => {
+	const h = dispatchHarness();
+	h.ctx.isIdle = () => false;
+	await h.execute({ agent: "scout", task: "busy" });
+	h.resolveRun(); await h.drain();
+	assert.equal(h.sendCalls.length, 0);
+	const prior = { type: "custom", customType: "existing", data: {} };
+	const entries = [prior];
+	for (const outcome of ["aborted", "error"]) assert.equal(await h.emit("agent_before_settle", { outcome, entries }), undefined);
+	const boundary = await h.emit("agent_before_settle", { outcome: "completed", entries, context: { canContinue: false, pendingMessages: [{ role: "user", content: "queued" }] } });
+	assert.equal(boundary.continue, true);
+	assert.deepEqual(entries, [prior], "input entries and queued messages are not mutated");
+	assert.equal(boundary.entries[0], prior);
+	assert.equal(boundary.entries.length, 2);
+	assert.match((await h.execute({ action: "status" })).content[0].text, /Runs \(1\)/);
+	assert.throws(() => h.discover().claim([boundary.entries[1].details.runId], "late"), /submitted/);
+	h.transcript.push(boundary.entries[1]);
+	await h.emit("message_end"); await h.drain();
+	assert.match((await h.execute({ action: "status" })).content[0].text, /no live runs/);
+});
+
+test("settled one-shot flush restores replaced drafts but never retries ambiguous native sends", async () => {
+	const h = dispatchHarness(null, {}, { holdDelivery: true });
+	h.ctx.isIdle = () => false;
+	await h.execute({ agent: "scout", task: "missing draft" });
+	h.resolveRun(); await h.drain();
+	await h.emit("agent_before_settle", { outcome: "completed", entries: [] });
+	// A later handler replaces the draft; no receipt exists. Host becomes idle after its notification.
+	await h.emit("agent_settled");
+	h.ctx.isIdle = () => true;
+	await h.drain();
+	assert.equal(h.sendCalls.length, 1);
+	await h.emit("agent_settled"); await h.drain();
+	assert.equal(h.sendCalls.length, 1);
+	assert.match((await h.execute({ action: "status" })).content[0].text, /Runs \(1\)/);
+	h.transcript.push({ type: "custom_message", ...h.sendCalls[0].msg });
+	await h.emit("turn_end"); await h.drain();
+	assert.match((await h.execute({ action: "status" })).content[0].text, /no live runs/);
+});
+
+test("late busy completion after pre-settle flushes once when the host becomes idle", async () => {
+	const h = dispatchHarness();
+	h.ctx.isIdle = () => false;
+	await h.execute({ agent: "scout", task: "late" });
+	assert.equal(await h.emit("agent_before_settle", { outcome: "completed", entries: [] }), undefined);
+	h.resolveRun(); await h.drain();
+	await h.emit("agent_settled");
+	h.ctx.isIdle = () => true;
+	await h.drain(); await h.drain();
+	assert.equal(h.sendCalls.length, 1);
+	assert.match((await h.execute({ action: "status" })).content[0].text, /no live runs/);
+});
+
+test("shared wait timeout release does not kill workers or shield them from parent Escape", async () => {
+	const h = dispatchHarness();
+	const accepted = await h.execute({ agent: "scout", task: "timeout" });
+	const ids = accepted.details.accepted.map((run: any) => run.runId);
+	const lease = h.discover().claim(ids, "timeout");
+	const releasedResult = lease.result.catch(() => {});
+	lease.release(); lease.release(); lease.commit();
+	assert.equal(h.calls[0].killCount, 0);
+	const reclaimed = h.discover().claim(ids, "again");
+	const rejected = assert.rejects(reclaimed.result, /stale session/);
+	await h.emit("agent_end", { messages: [{ role: "assistant", stopReason: "aborted" }] });
+	assert.equal(h.calls[0].killCount, 1);
+	h.resolveRun(); await rejected; await releasedResult;
+	reclaimed.commit(); reclaimed.release();
+	assert.equal(h.sendCalls.length, 0);
+});
+
+for (const event of ["session_start", "session_shutdown"]) {
+	test(`shared wait ${event} invalidates providers, leases, and scheduled idle flush`, async () => {
+		const h = dispatchHarness();
+		h.ctx.isIdle = () => false;
+		const accepted = await h.execute({ agent: "scout", task: "old session" });
+		const ids = accepted.details.accepted.map((run: any) => run.runId);
+		const provider = h.discover();
+		const lease = provider.claim(ids, "stale");
+		const rejected = assert.rejects(lease.result, /stale session/);
+		await h.emit("agent_settled");
+		await h.emit(event);
+		h.ctx.isIdle = () => true;
+		assert.throws(() => provider.claim(ids, "old"), /stale session/);
+		assert.equal(h.calls[0].killCount, 1);
+		h.resolveRun(); await rejected; await h.drain();
+		assert.doesNotThrow(() => { lease.release(); lease.commit(); });
+		assert.equal(h.sendCalls.length, 0);
+	});
+}

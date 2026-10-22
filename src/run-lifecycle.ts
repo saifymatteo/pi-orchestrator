@@ -40,6 +40,7 @@ export interface RunDelivery {
 }
 export interface RunWatcherDeps {
 	deliver(delivery: RunDelivery): void | Promise<void>;
+	canDeliver?(): boolean;
 	onIdle(): void;
 	now(): number;
 	onChange?(): void;
@@ -59,7 +60,17 @@ export interface RunWatcherStartInput {
 		onProgress(progress: RunProgress): void;
 	}): Promise<SingleResult>;
 }
+export interface RunLease {
+	result: Promise<RunDelivery[]>;
+	commit(): void;
+	release(): void;
+}
 export interface RunWatcher {
+	claim(ids: number[], owner: string): RunLease;
+	flush(): void;
+	/** Offers are retained until a positive branch receipt; finalized missing drafts may be offered again. */
+	offer(): RunDelivery[];
+	finishBoundary(): void;
 	start(input: RunWatcherStartInput): RunHandle;
 	/** Reserve the entire batch before any member's start function is called. */
 	startMany(inputs: RunWatcherStartInput[]): RunHandle[];
@@ -100,6 +111,9 @@ export function createRunWatcher(deps: RunWatcherDeps): RunWatcher {
 		deliveryError?: string;
 		deliveryAttempt: number;
 		outcome?: SingleResult;
+		claim?: object;
+		submitted?: boolean;
+		offered?: boolean;
 		resolve(result: SingleResult): void;
 		result: Promise<SingleResult>;
 	}
@@ -131,8 +145,24 @@ export function createRunWatcher(deps: RunWatcherDeps): RunWatcher {
 		record.killIssued = true;
 		try { record.kill(); } catch { /* runner still settles through its promise */ }
 	}
+	function delivery(record: Record): RunDelivery {
+		return {
+			runId: record.input.runId, deliveryId: record.deliveryId,
+			agent: record.input.agent, task: record.input.task, mode: record.input.mode,
+			result: record.outcome!, cancelled: record.cancelled,
+		};
+	}
+	function eligible(record: Record) {
+		return !record.aborted && !!record.outcome && !record.claim && !record.submitted && !record.offered;
+	}
+	function flush() {
+		try { if (deps.canDeliver && !deps.canDeliver()) return; }
+		catch { return; /* unavailable host context: retain outcomes */ }
+		for (const record of records.values()) if (eligible(record)) submit(record);
+	}
 	function submit(record: Record) {
-		if (record.aborted || !record.outcome) return;
+		if (record.aborted || !record.outcome || record.claim) return;
+		record.submitted = true;
 		record.state = "delivery-pending";
 		record.deliveryError = undefined;
 		const attempt = ++record.deliveryAttempt;
@@ -143,11 +173,7 @@ export function createRunWatcher(deps: RunWatcherDeps): RunWatcher {
 			publish();
 		};
 		try {
-			const returned = deps.deliver({
-				runId: record.input.runId, deliveryId: record.deliveryId,
-				agent: record.input.agent, task: record.input.task, mode: record.input.mode,
-				result: record.outcome, cancelled: record.cancelled,
-			});
+			const returned = deps.deliver(delivery(record));
 			// Real pi returns void. An injected/alternate sender may expose errors,
 			// but a resolved promise still is NOT transcript confirmation.
 			if (returned) Promise.resolve(returned).catch(failed);
@@ -163,7 +189,10 @@ export function createRunWatcher(deps: RunWatcherDeps): RunWatcher {
 		};
 		record.outcome = result;
 		if (record.aborted || record.input.pushResult === false) records.delete(record.input.runId);
-		else submit(record);
+		else {
+			record.state = "delivery-pending";
+			flush();
+		}
 		record.resolve(result);
 		drain();
 		publish();
@@ -233,6 +262,56 @@ export function createRunWatcher(deps: RunWatcherDeps): RunWatcher {
 		return handles;
 	}
 	return {
+		flush,
+		offer() {
+			const drafts: RunDelivery[] = [];
+			for (const record of records.values()) if (eligible(record)) {
+				record.offered = true;
+				drafts.push(delivery(record));
+			}
+			return drafts;
+		},
+		finishBoundary() {
+			for (const record of records.values()) record.offered = false;
+		},
+		claim(ids, owner) {
+			if (typeof owner !== "string" || !owner.trim() || !Array.isArray(ids) || !ids.length ||
+				Array.from(ids).some((id) => !Number.isSafeInteger(id) || id < 1) || new Set(ids).size !== ids.length) {
+				throw new Error("Agent claim requires an owner and distinct positive run ids.");
+			}
+			const batch = ids.map((id) => {
+				const record = records.get(id);
+				if (!record || record.aborted) throw new Error(`Agent run ${id} is missing or already consumed.`);
+				if (record.input.pushResult === false) throw new Error(`Agent run ${id} belongs to a blocking dispatch.`);
+				if (record.claim) throw new Error(`Agent run ${id} is already claimed.`);
+				if (record.submitted || record.offered) throw new Error(`Agent run ${id} is already submitted; queued delivery cannot be withdrawn.`);
+				return record;
+			});
+			const token = {};
+			for (const record of batch) record.claim = token;
+			let closed = false;
+			const close = (consume: boolean) => {
+				if (closed) return;
+				if (consume && batch.some((record) => !record.settled && !record.aborted)) {
+					return; // Premature cleanup must not throw or consume unfinished work.
+				}
+				closed = true;
+				for (const record of batch) {
+					if (records.get(record.input.runId) !== record || record.aborted || record.claim !== token) continue;
+					record.claim = undefined;
+					if (consume) records.delete(record.input.runId);
+				}
+				flush();
+				publish();
+			};
+			return {
+				result: Promise.all(batch.map(async (record) => {
+					await record.result;
+					return delivery(record);
+				})),
+				commit: () => close(true), release: () => close(false),
+			};
+		},
 		start: (input) => startMany([input])[0],
 		startMany,
 		entries: () => [...records.values()].filter((r) => !r.aborted).map((r) => ({
@@ -282,6 +361,7 @@ export function createRunWatcher(deps: RunWatcherDeps): RunWatcher {
 		retryDelivery(runId) {
 			const record = records.get(runId);
 			if (!record?.settled || record.aborted) return { ok: false, error: `No retained Result for run ${runId}.` };
+			if (record.claim || record.offered) return { ok: false, error: `Run ${runId} is owned by a shared wait or boundary delivery.` };
 			submit(record);
 			publish();
 			return { ok: true };
