@@ -32,13 +32,13 @@ A standard `$schema` reference enables completion, hover documentation, and stri
 ```jsonc
 {
   // Match this version to the installed package.
-  "$schema": "https://cdn.jsdelivr.net/npm/@saifymatteo/pi-orchestrator@0.8.0/schemas/orchestrator.schema.json",
+  "$schema": "https://cdn.jsdelivr.net/npm/@saifymatteo/pi-orchestrator@0.9.0/schemas/orchestrator.schema.json",
   "keepTools": ["delegate", "hindsight_*"],
   "childBlockedTools": ["hindsight_*"]
 }
 ```
 
-Use the schema URL matching your installed package version, shown above for `0.8.0`. In a development checkout, use a local reference instead, such as `"$schema": "../schemas/orchestrator.schema.json"` for a config one directory below the checkout root. Adjust the relative path from your config's directory to the checkout's schema; the same path will not generally work in `~/.pi/agent/`.
+Use the schema URL matching your installed package version, shown above for `0.9.0`. In a development checkout, use a local reference instead, such as `"$schema": "../schemas/orchestrator.schema.json"` for a config one directory below the checkout root. Adjust the relative path from your config's directory to the checkout's schema; the same path will not generally work in `~/.pi/agent/`.
 
 Editor diagnostics are **not runtime validation**. Unknown setting names (including typos such as `maxTurn`) are flagged in the editor but remain ignored by the loader and preserved on save. Invalid values such as `maxTurns: 0` get editor diagnostics while retaining the existing runtime fallback behavior. Supported agent-name maps allow arbitrary names; their values and known nested fields are still checked by the editor. Schema `default` annotations document defaults, not instructions to insert them into your file. `$schema` is metadata, not a runtime option.
 

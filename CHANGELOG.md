@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-22
+
 ### Added
 
 - Session-scoped agent producer exposed through the `async-work:providers:v1` event-bus protocol: atomic result leases let other extensions collect outcomes without another run registry. Timeout/independent cancellation releases ownership; parent Escape and teardown still cancel the fleet (ADR-0021).
@@ -205,3 +207,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.3]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.1.1...v0.1.2
 [0.8.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.7.0...v0.8.0
+[0.9.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.8.0...v0.9.0
