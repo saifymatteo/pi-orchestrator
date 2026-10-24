@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-24
+
 ### Added
 
 - Optional pi-atelier **Orchestrator Fleet** panel (`orchestrator:fleet`) through the public `pi-atelier:sidebar-panels` protocol v1, showing the existing fleet state in compact left-aligned structured text rows (no `keyValues`), with idle AUTO/ENGAGED mode and a bullet roster, plus a two-line active header, without task/prompt excerpts or a dependency. New panels start hidden; enable it via `/atelier` → Settings → Display or `/atelier display`. No native Subagents cost graph integration.
@@ -213,3 +215,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.2]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.1.1...v0.1.2
 [0.8.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.7.0...v0.8.0
 [0.9.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.8.0...v0.9.0
+[0.10.0]: https://github.com/saifymatteo/pi-orchestrator/compare/v0.9.0...v0.10.0
