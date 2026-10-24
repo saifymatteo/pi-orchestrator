@@ -128,6 +128,7 @@ test("loadConfig: missing file yields full defaults", () => {
 		const config = loadConfig();
 		assert.deepEqual(config, {
 			enabled: true,
+			showFleetWidget: true,
 			keepTools: ["delegate"],
 			keepToolOverrides: {},
 			childBlockedTools: [],
@@ -143,6 +144,23 @@ test("loadConfig: missing file yields full defaults", () => {
 			async: true,
 		});
 	});
+});
+
+test("loadConfig: showFleetWidget defaults to true and accepts only booleans", () => {
+	for (const value of [undefined, null, "false", "true", "", 0, 1, [], {}]) {
+		withConfigFile({ enabled: false, showFleetWidget: value }, () => {
+			const config = loadConfig();
+			assert.equal(config.showFleetWidget, true, `showFleetWidget=${JSON.stringify(value)}`);
+			assert.equal(config.enabled, false, "invalid widget values must not reset other settings");
+		});
+	}
+	for (const showFleetWidget of [true, false]) {
+		withConfigFiles({ "orchestrator.jsonc": JSON.stringify({ showFleetWidget }) }, () => {
+			assert.equal(loadConfig().showFleetWidget, showFleetWidget);
+			saveConfig(loadConfig());
+			assert.equal(loadConfig().showFleetWidget, showFleetWidget, "widget preference survives saves");
+		});
+	}
 });
 
 test("loadConfig: normalizes exact override names and ignores invalid entries", () => {

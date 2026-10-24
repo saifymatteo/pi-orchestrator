@@ -13,7 +13,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
 
-import { idleFleetWidgetLines, renderFleetLines, runSingleAgent } from "../src/delegate.ts";
+import { fleetTasksSnapshot, idleFleetWidgetLines, renderFleetLines, runSingleAgent } from "../src/delegate.ts";
+import { createFleetPanel, renderFleetPanel } from "../src/fleet-panel.ts";
 import type { Message } from "@earendil-works/pi-ai";
 import { collectTouchedFiles, fleetKey, formatTouchedFiles, isToolTurn, nextFleetRunId, parallelProgress, runStatus, taskStatus, type SingleResult } from "../src/delegate.ts";
 import { buildChildSpawnArgs, expandBlockedToolsToNames, passThroughMatchers, resolveChildExcludeTools, resolveThinkingLevel, stableSessionId } from "../src/delegate.ts";
@@ -1176,6 +1177,103 @@ for (const mode of ["auto", "engaged"] as const) {
 		await flushD();
 	});
 }
+
+test("Atelier fleet observer: projects queue, execution, retained/failed delivery and teardown without owning runs", async () => {
+	const panels: string[][] = [];
+	const panel = createFleetPanel({
+		on: () => () => {},
+		emit(_channel, data: any) {
+			if (data.type !== "register") return;
+			assert.equal("keyValues" in data.panel, false, "sidebar must not prefer label/value rendering");
+			panels.push(data.panel.rows.map((row: string | { text: string }) => typeof row === "string" ? row : row.text));
+		},
+	}, () => renderFleetPanel(fleetTasksSnapshot(), ["scout", "worker"], "engaged"));
+	const h = dispatchHarness(null, {
+		getMaxConcurrency: () => 1,
+		onFleetChange: () => panel.update(),
+	}, { sendMessage: () => { throw new Error("delivery failed"); } });
+	panel.start();
+	try {
+		h.ctx.isIdle = () => false;
+		await h.execute({ tasks: [{ agent: "scout", task: "first" }, { agent: "worker", task: "second" }] });
+		assert.match(panels.at(-1)![1], /1 running · 1 queued/);
+		assert.ok(panels.at(-1)!.includes("worker · queued"));
+		assert.equal(panels.at(-1)!.slice(0, 2).join(" · "), h.widgets.at(-1)![0], "shared state, separate header layout");
+		assert.ok(!panels.at(-1)!.some((row) => row.includes("first") || row.includes("second")), "sidebar omits task excerpts");
+		h.resolveRun();
+		await flushD();
+		assert.match(panels.at(-1)![1], /1 running · 1 delivery pending/);
+		assert.ok(panels.at(-1)!.includes("scout · result pending"));
+		h.resolveRun();
+		await flushD();
+		assert.match(panels.at(-1)![1], /0 running · 2 delivery pending/);
+		h.ctx.isIdle = () => true;
+		await h.emit("agent_settled");
+		await flushD();
+		assert.match(panels.at(-1)![1], /2 delivery failed/);
+		assert.ok(panels.at(-1)!.includes("worker · delivery failed"));
+		assert.equal(h.calls.length, 2, "display changes never rerun Workers");
+		await h.emit("session_shutdown");
+		assert.deepEqual(panels.at(-1), ["ENGAGED · idle", "• scout", "• worker"]);
+	} finally { panel.dispose(); await h.emit("session_shutdown"); }
+});
+
+test("fleet observer receives live Worker turn/context/token progress", async () => {
+	let progress: any;
+	let complete: any;
+	const projections: string[][] = [];
+	const h = dispatchHarness(null, {
+		runAgent: (options: any) => {
+			progress = options.onProgress;
+			return new Promise<SingleResult>((resolve) => { complete = resolve; });
+		},
+		onFleetChange: () => projections.push(renderFleetPanel(fleetTasksSnapshot(), ["scout"], "engaged").rows.map((row) => row.text)),
+	});
+	await h.execute({ agent: "scout", task: "live progress" });
+	progress({ turns: 4, toolTurns: 3, contextTokens: 512, inputTokens: 120, outputTokens: 30 });
+	assert.equal(projections.at(-1)![2], "scout · turn 3");
+	assert.equal(projections.at(-1)![3], "ctx 512 · ↑120 ↓30");
+	complete(singleResult({ completedNormally: true, exitCode: 0 }));
+	await flushD();
+	await h.emit("session_shutdown");
+});
+
+test("manual widget visibility never suppresses sidebar updates or Result delivery", async () => {
+	let visible = false;
+	const projections: string[][] = [];
+	const h = dispatchHarness(null, {
+		getShowFleetWidget: () => visible,
+		onFleetChange: () => projections.push(renderFleetPanel(fleetTasksSnapshot(), ["scout"], "auto").rows.map((row) => row.text)),
+	});
+	const accepted = await h.execute({ agent: "scout", task: "retained in transcript" });
+	assert.equal(accepted.details.mode, "accepted");
+	assert.ok(h.widgets.length > 0);
+	assert.equal(h.widgets.filter((lines) => lines !== undefined).length, 0, "running updates must not resurrect a disabled widget");
+	assert.equal(projections.at(-1)![0], "⏳ Fleet · single");
+	assert.equal(projections.at(-1)![1], "1 running");
+	h.resolveRun();
+	await flushD();
+	assert.equal(h.sendCalls.length, 1);
+	assert.equal(h.sendCalls[0].msg.display, true, "the transcript Result remains visible");
+	assert.equal(h.widgets.filter((lines) => lines !== undefined).length, 0, "delivery updates respect the same setting");
+	visible = true;
+	await h.execute({ agent: "scout", task: "detailed fallback" });
+	assert.match(h.widgets.at(-1)![0], /⏳ Fleet · single · 1 running/);
+	assert.ok(h.widgets.at(-1)!.some((row) => row.includes("detailed fallback")));
+	h.resolveRun();
+	await flushD();
+	await h.emit("session_shutdown");
+});
+
+test("throwing fleet observer cannot prevent widget updates or Result delivery", async () => {
+	const h = dispatchHarness(null, { onFleetChange: () => { throw new Error("optional UI failed"); } });
+	await h.execute({ agent: "scout", task: "recon auth" });
+	assert.match(h.widgets.at(-1)![0], /1 running/);
+	h.resolveRun();
+	await flushD();
+	assert.equal(h.sendCalls.length, 1);
+	await h.emit("session_shutdown");
+});
 
 test("async default: single dispatch returns an acceptance immediately (runner not awaited)", async () => {
 	const h = dispatchHarness();

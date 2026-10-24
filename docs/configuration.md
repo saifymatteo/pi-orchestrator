@@ -8,6 +8,7 @@ Configuration file: `~/.pi/agent/orchestrator.jsonc`.
 
 - [Editor assistance and field reference](#editor-assistance-and-field-reference)
 - [Shared Worker capacity](#shared-worker-capacity)
+- [Fleet displays](#fleet-displays)
 - [Engagement and parent tool access](#engagement-and-parent-tool-access)
 - [Child tool policy](#child-tool-policy)
 - [Parent prompt forwarding](#parent-prompt-forwarding)
@@ -60,6 +61,44 @@ Two optional settings configure the shared Worker pool:
 Both are bounded by JavaScript's maximum safe integer (`9007199254740991`); missing or invalid runtime values fall back to their defaults. `maxQueuedRuns: 0` allows dispatch only when every task can immediately take an active slot. These limits apply across delegate calls and modes in one parent session, not across independent parent sessions. The maximum of 8 tasks in a parallel request is unchanged.
 
 The limits follow the existing configuration lifecycle: loaded at extension initialization and reloaded on `session_start`. Editing the file does not install a live file watcher. Whenever changed limits take effect, already accepted runs remain owned; lowering a limit drains existing work without killing active Workers or evicting queued runs. See [ADR-0020](adr/0020-live-session-run-lifecycle.md) for admission and delivery semantics.
+
+## Fleet displays
+
+`showFleetWidget` controls only the live transcript-area fleet widget. It defaults to `true`; only boolean values are accepted, and missing or invalid values fall back to `true`. Setting it to `false` does not suppress Result messages, acceptance messages, or transcripts, and does not control the optional Atelier sidebar.
+
+With a sidebar-capable [pi-atelier](https://github.com/michaelmjhhhh/pi-atelier) installed, open `/atelier display` (or `/atelier` → **Settings** → **Display**) and enable **Orchestrator Fleet** (`orchestrator:fleet`). New panels start hidden. The panel uses the same fleet state but its own compact sidebar layout: mode, Run status, turns, context, tokens, and delivery state, with no task or prompt excerpts. It does not use Atelier's native Subagents cost graph and adds no dependency.
+
+The sidebar publishes compact, left-aligned structured text rows, never label/value (`keyValues`) fields. Idle mode appears above a bullet roster, with no redundant Fleet heading:
+
+```text
+AUTO · idle
+• scout
+• worker
+```
+
+Engaged mode uses `ENGAGED · idle`; an empty roster shows `(empty fleet)` below the mode. While Runs or deliveries remain active, the sidebar separates the dispatch title and counts:
+
+```text
+⏳ Fleet · single
+0 running · 1 delivery pending
+```
+
+Only the sidebar uses this two-line header; the detailed widget keeps its original single-line header and task excerpts. Running Workers use two compact rows, such as `worker · turn 3` and `ctx 12k · ↑4.2k ↓800`. Queued and retained Runs use `scout · queued` and `worker · result pending`; failed delivery uses `worker · delivery failed`. Metadata is muted and failures carry an error role. Atelier clips rows at the available width rather than wrapping, so very narrow sidebars can still truncate text.
+
+To hand off the live display to the sidebar manually:
+
+1. Enable **Orchestrator Fleet** through `/atelier display`.
+2. Set the following in `~/.pi/agent/orchestrator.jsonc`:
+
+   ```jsonc
+   {
+     "showFleetWidget": false // default true; hides only the live transcript-area widget
+   }
+   ```
+
+3. Start a new session to load the setting. Configuration is loaded at extension initialization and on `session_start`, not watched live.
+
+There is no automatic consumer detection or widget hiding: the sidebar protocol has no visibility acknowledgement, so discovery cannot prove a panel is visible. Both displays can remain enabled. If you hide or uninstall the sidebar, restore `showFleetWidget: true` to regain the live transcript-area widget.
 
 ## Engagement and parent tool access
 

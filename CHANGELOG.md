@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional pi-atelier **Orchestrator Fleet** panel (`orchestrator:fleet`) through the public `pi-atelier:sidebar-panels` protocol v1, showing the existing fleet state in compact left-aligned structured text rows (no `keyValues`), with idle AUTO/ENGAGED mode and a bullet roster, plus a two-line active header, without task/prompt excerpts or a dependency. New panels start hidden; enable it via `/atelier` → Settings → Display or `/atelier display`. No native Subagents cost graph integration.
+- `showFleetWidget` (default `true`) controls only the live transcript-area fleet widget. Set it to `false` for manual sidebar handoff; Result messages, acceptance messages, and transcripts are unaffected. Consumer discovery never hides the widget automatically: the sidebar protocol has no visibility acknowledgement.
+
 ## [0.9.0] - 2026-10-22
 
 ### Added

@@ -46,7 +46,7 @@
     "jsonc-parser": "^3.3.1"
   },
   "scripts": {
-    "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/config-schema.test.ts tests/agents.test.ts tests/delegate.test.ts tests/width.test.ts tests/index.test.ts tests/rpc-waiters.test.ts tests/watcher.test.ts tests/worker-runner.test.ts",
+    "test": "node --test --experimental-strip-types --import ./tests/register-stubs.mjs tests/config.test.ts tests/config-schema.test.ts tests/agents.test.ts tests/delegate.test.ts tests/fleet-panel.test.ts tests/width.test.ts tests/index.test.ts tests/rpc-waiters.test.ts tests/watcher.test.ts tests/worker-runner.test.ts",
     "typecheck": "tsc --noEmit",
     "schema:generate": "node --experimental-strip-types scripts/generate-config-schema.mts"
   },

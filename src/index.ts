@@ -33,7 +33,8 @@ import {
 	type OrchestratorConfig,
 } from "./config.ts";
 import * as fs from "node:fs";
-import { abortActiveRuns, clearFleetWidget, hasRunningTasks, idleFleetWidgetLines, registerDelegateTool, type DelegateDeps } from "./delegate.ts";
+import { abortActiveRuns, clearFleetWidget, fleetTasksSnapshot, hasRunningTasks, idleFleetWidgetLines, registerDelegateTool, type DelegateDeps } from "./delegate.ts";
+import { createFleetPanel, renderFleetPanel } from "./fleet-panel.ts";
 import { buildPolicy } from "./policy.ts";
 import { truncateToWidth } from "./width.ts";
 import type { AgentConfig } from "./agents.ts";
@@ -274,7 +275,7 @@ export function createPolicyTextCache(
  * reassigns `config` from disk) so every dep reads the current values, never
  * a stale copy. Exported for unit tests (tests/index.test.ts).
  */
-export function buildDelegateDeps(getConfig: () => OrchestratorConfig, onIdle: () => void): DelegateDeps {
+export function buildDelegateDeps(getConfig: () => OrchestratorConfig, onIdle: () => void, onFleetChange?: () => void): DelegateDeps {
 	return {
 		getAgents: () => discoverAgents(getConfig()),
 		getDispatchDefaults: (ctx: any) => ({
@@ -318,6 +319,8 @@ export function buildDelegateDeps(getConfig: () => OrchestratorConfig, onIdle: (
 			}
 		},
 		onIdle,
+		onFleetChange,
+		getShowFleetWidget: () => getConfig().showFleetWidget,
 	};
 }
 
@@ -332,6 +335,9 @@ export default function (pi: any) {
 	let config: OrchestratorConfig = loadConfig();
 	let engaged = config.enabled;
 	let lastUi: any;
+	const fleetPanel = createFleetPanel(pi.events, () => renderFleetPanel(
+		fleetTasksSnapshot(), discoverAgents(config).map((a) => a.name), engaged ? "engaged" : "auto",
+	));
 	// AUTO (enabled:false) NEVER touches the active tool set. Which built-in
 	// tools are active is pi's concern (its `defaultTools` setting,
 	// docs/settings.md), and extension tools belong to the extensions that
@@ -360,15 +366,19 @@ export default function (pi: any) {
 	const policyCache = createPolicyTextCache(computePolicyText);
 
 	function updateIdleWidget(): void {
+		fleetPanel.update();
 		if (!lastUi?.setWidget) return;
+		if (!config.showFleetWidget) {
+			clearFleetWidget(lastUi);
+			return;
+		}
 		// Clobber guard: never repaint the (idle) fleet widget while a subagent
 		// or an unresolved Result is visible. The lifecycle owner guards this, so idle is
 		// never wrongly suppressed — this only defuses stale/extra callers.
 		if (hasRunningTasks()) return;
 		try {
-			// Always painted, never hidden mid-session: this widget is the only
-			// place the state is visible, and clearing it when disengaged left
-			// whatever a finished run last painted on screen instead.
+			// When enabled, always replace finished-run details with idle state;
+			// AUTO is not a reason to hide the widget. The sidebar is independent.
 			lastUi.setWidget(
 				"orchestrator-fleet",
 				idleFleetWidgetLines(
@@ -450,6 +460,7 @@ export default function (pi: any) {
 	// ── Session lifecycle ───────────────────────────────────────────────────
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
+		fleetPanel.dispose();
 		config = loadConfig();
 		parentSystemPrompt = undefined; // Defensive: don't forward a stale prompt across sessions
 		policyCache.invalidate(); // Fresh policy text for the new session's episode (ADR-0013)
@@ -473,6 +484,7 @@ export default function (pi: any) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		fleetPanel.dispose();
 		// User requirement: never leave fleet agents running in the background.
 		// Mark first so dying runs skip result delivery (no pushes during teardown).
 		abortActiveRuns();
@@ -534,7 +546,12 @@ ${policyCache.get()}` };
 
 	// ── The delegate tool ───────────────────────────────────────────────────
 
-	registerDelegateTool(pi, buildDelegateDeps(() => config, () => updateIdleWidget()));
+	registerDelegateTool(pi, buildDelegateDeps(() => config, () => updateIdleWidget(), () => fleetPanel.update()));
+	// Run after the owner's session_start hook so discovery sees the cleared
+	// session, never the previous fleet. No terminal UI in RPC/print.
+	pi.on("session_start", (_event: any, ctx: any) => {
+		if (ctx?.mode === "tui") fleetPanel.start();
+	});
 
 	// ── Commands ────────────────────────────────────────────────────────────
 

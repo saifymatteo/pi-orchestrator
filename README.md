@@ -64,6 +64,19 @@ Discovery/control actions include `list`, `sessions`, `status`, `cancel`, and `r
 
 **Extension integration (Pi 1.3.0):** other extensions in the same parent session can tap into our agent-result mechanism through the `async-work:providers:v1` event-bus protocol. Emit a discovery request to obtain the agent provider, then claim and collect results through its lease API. No specific consumer extension is required or added as a dependency. See [Event-bus integration](docs/usage.md#event-bus-integration-pi-130) for the protocol and an example.
 
+## Optional pi-atelier fleet panel
+
+With [pi-atelier](https://github.com/michaelmjhhhh/pi-atelier) supporting sidebar contributions installed, **Orchestrator Fleet** (`orchestrator:fleet`) is available through its public `pi-atelier:sidebar-panels` protocol v1. The integration adds no dependency: pi-atelier is not required. The sidebar has its own compact layout, separate from the live transcript-area fleet widget.
+
+New panels start hidden. To enable this one:
+
+1. Open `/atelier` → **Settings** → **Display** (or run `/atelier display`).
+2. Enable **Orchestrator Fleet**.
+
+The panel uses the existing watcher fleet projection: idle `AUTO`/`ENGAGED` status, queued and running Runs, turns, context, tokens, and pending or failed Result delivery. Its compact sidebar layout uses left-aligned structured text rows, not label/value (`keyValues`) fields, and omits task and prompt excerpts. Idle shows `AUTO · idle` or `ENGAGED · idle` followed by a bullet roster (`• scout`, `• worker`), or `(empty fleet)` when no agents are available, without a redundant Fleet heading. The active sidebar puts the dispatch title and status counts on separate rows; the detailed widget keeps its single-line header. Atelier clips rows to the available width rather than wrapping them. It does not integrate with Atelier's native Subagents cost graph.
+
+The live transcript-area widget stays visible by default (`showFleetWidget: true`). To use only the sidebar, enable it first, then set `"showFleetWidget": false` in `~/.pi/agent/orchestrator.jsonc` and start a new session. This hides only the live widget: Result messages, acceptance messages, and transcripts are unaffected. Handoff is manual; consumer discovery never hides the widget because the sidebar protocol has no visibility acknowledgement. Restore `true` if you disable or remove the sidebar. See [Fleet displays](docs/configuration.md#fleet-displays) for the recipe.
+
 ## Guides
 
 - [Configuration](docs/configuration.md): schema/editor help, parent and child tools, extension control, models, thinking, budgets, and optional guardrails.

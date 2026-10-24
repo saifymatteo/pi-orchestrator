@@ -26,6 +26,10 @@ const configDefinition = Type.Object({
 		description: "Engage orchestration by default. /orchestrator toggles engagement and persists it here; false leaves normal pi tools available (AUTO mode).",
 		default: true,
 	}),
+	showFleetWidget: Type.Boolean({
+		description: "Show the live transcript-area fleet widget. false hides only this widget, not the optional Atelier sidebar panel, Result/acceptance messages, or transcripts. Sidebar handoff is manual: consumer discovery never hides the widget.",
+		default: true,
+	}),
 	keepTools: Type.Array(nonblankString, {
 		description: "Tools kept while engaged: case-insensitive exact names, globs (* for any run, ? for one character), or ext:<extension-id>. delegate is always kept. Omitted uses [\"delegate\"] (keep-list-only); [] instead auto-keeps discovered non-builtin extensions. Extensions shadowing builtin tool names contribute only non-colliding tools unless explicitly listed by ext:<id>. Non-empty lists keep only matching tools plus delegate. Stale matchers are harmless; discovery alone does not grant access.",
 		default: ["delegate"],

@@ -19,6 +19,8 @@ test("published JSON schema describes defaults and validates editable values wit
 	assert.match(schema.properties.keepTools.description, /auto-keeps/);
 	assert.deepEqual(schema.properties.keepToolOverrides.default, {});
 	assert.equal(schema.properties.maxTurns.default, 50);
+	assert.equal(schema.properties.showFleetWidget.type, "boolean");
+	assert.equal(schema.properties.showFleetWidget.default, true);
 	for (const [key, minimum, fallback] of [["maxConcurrency", 1, 4], ["maxQueuedRuns", 0, 32]] as const) {
 		assert.equal(schema.properties[key].type, "integer");
 		assert.equal(schema.properties[key].minimum, minimum);
@@ -35,6 +37,7 @@ test("published JSON schema describes defaults and validates editable values wit
 		{ keepTools: [], childExtensions: [], childBlockedTools: [] },
 		{ keepToolOverrides: { foo_a: "blocked", read: "allowed", "foo_*": "allowed" } },
 		{ keepToolOverrides: { ["__proto__"]: "allowed", "custom\nname": "blocked" } },
+		{ showFleetWidget: true }, { showFleetWidget: false },
 		{ builtinFleet: false },
 		{ builtinFleet: {} },
 		{ builtinFleet: { futureAgent: {}, worker: { thinking: "xhigh", hidden: true } } },
@@ -47,6 +50,8 @@ test("published JSON schema describes defaults and validates editable values wit
 		{ keepTools: ["hindsight_*", "ext:@example/tools", " tool "] },
 	]) assert.equal(Check(schema, valid), true, JSON.stringify(valid));
 	for (const invalid of [
+		{ showFleetWidget: "false" }, { showFleetWidget: null }, { showFleetWidget: 0 },
+		{ showFleetWidget: [] }, { showFleetWidget: {} },
 		{ maxTurn: 7 }, { maxTurns: 0 }, { maxTurns: 1.5 }, { maxTurns: "7" },
 		{ maxConcurrency: 0 }, { maxConcurrency: -1 }, { maxConcurrency: 1.5 }, { maxConcurrency: "4" },
 		{ maxQueuedRuns: -1 }, { maxQueuedRuns: 0.5 }, { maxQueuedRuns: "0" },

@@ -88,7 +88,7 @@ export function fleetTasksSnapshot(): RunningTask[] {
 	return activeWatcher?.snapshot() ?? [];
 }
 
-function formatTokens(count: number): string {
+export function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
 	if (count < 1000000) return `${Math.round(count / 1000)}k`;
@@ -104,15 +104,8 @@ function truncateWithEllipsis(text: string, max: number): string {
 	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
-/**
- * Pure line builder for the fleet widget: grouped header (dispatch mode +
- * running count) with one indented line per running task, or the idle
- * fallback line when nothing runs.
- */
-export function renderFleetLines(tasks: RunningTask[], agentNames: string[], orchestratorMode: OrchestratorMode): string[] {
-	if (tasks.length === 0) {
-		return idleFleetWidgetLines(agentNames, orchestratorMode);
-	}
+/** Shared header content; each UI decides whether to join or split the rows. */
+export function fleetHeaderLines(tasks: RunningTask[]): [string, string] {
 	const modes = new Set(tasks.map((t) => t.mode));
 	const mode = modes.size === 1 ? tasks[0].mode : "mixed";
 	const count = (state: string) => tasks.filter((t) => t.state === state).length;
@@ -121,7 +114,13 @@ export function renderFleetLines(tasks: RunningTask[], agentNames: string[], orc
 	if (count("queued")) counts.push(`${count("queued")} queued`);
 	if (count("delivery-pending")) counts.push(`${count("delivery-pending")} delivery pending`);
 	if (count("delivery-failed")) counts.push(`${count("delivery-failed")} delivery failed`);
-	const lines: string[] = [`⏳ Fleet · ${mode} · ${counts.join(" · ")}`];
+	return [`⏳ Fleet · ${mode}`, counts.join(" · ")];
+}
+
+/** Detailed transcript-area widget, including task excerpts. */
+export function renderFleetLines(tasks: RunningTask[], agentNames: string[], orchestratorMode: OrchestratorMode): string[] {
+	if (tasks.length === 0) return idleFleetWidgetLines(agentNames, orchestratorMode);
+	const lines: string[] = [fleetHeaderLines(tasks).join(" · ")];
 	// Pad to the longest current name (capped) for column alignment; names past
 	// the cap are truncated so the columns can never blow past it either.
 	const nameWidth = Math.min(MAX_AGENT_NAME_WIDTH, Math.max(...tasks.map((t) => t.agent.length)));
@@ -1592,6 +1591,10 @@ export interface DelegateDeps {
 	/** Async result deliveries auto-resume the orchestrator when idle (ADR-0014).
 	 *  Required - without it a settled run's push is silently dropped. */
 	onIdle: () => void;
+	/** Optional presentation observer; never owns run state. */
+	onFleetChange?: () => void;
+	/** The detailed live widget is independently optional; Results are never hidden. */
+	getShowFleetWidget?: () => boolean;
 	/** The child runner. Defaults to the real runSingleAgent; tests inject a
 	 *  fake here to drive dispatch without spawning pi processes. */
 	runAgent?: RunAgent;
@@ -1714,7 +1717,11 @@ export function registerDelegateTool(pi: any, deps: DelegateDeps): void {
 		},
 		onIdle: () => deps.onIdle(),
 		onChange: () => {
-			if (sessionContext) updateFleetWidget(sessionContext, deps.getAgents().map((a) => a.name), deps.getOrchestratorMode(), watcher.snapshot());
+			try { deps.onFleetChange?.(); } catch { /* Optional UI cannot break the widget or owner. */ }
+			if (sessionContext) {
+				if (deps.getShowFleetWidget?.() === false) clearFleetWidget(sessionContext.ui);
+				else updateFleetWidget(sessionContext, deps.getAgents().map((a) => a.name), deps.getOrchestratorMode(), watcher.snapshot());
+			}
 		},
 		now: () => Date.now(),
 		limits: () => ({ maxConcurrency: deps.getMaxConcurrency?.() ?? 4, maxQueuedRuns: deps.getMaxQueuedRuns?.() ?? 32 }),

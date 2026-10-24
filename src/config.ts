@@ -157,6 +157,7 @@ export function loadConfig(): OrchestratorConfig {
 		if (errors.length > 0 || !raw || typeof raw !== "object") throw new Error("invalid config");
 		return {
 			enabled: typeof raw.enabled === "boolean" ? raw.enabled : DEFAULT_CONFIG.enabled,
+			showFleetWidget: typeof raw.showFleetWidget === "boolean" ? raw.showFleetWidget : DEFAULT_CONFIG.showFleetWidget,
 			keepTools: Array.isArray(raw.keepTools)
 				? raw.keepTools.filter((m): m is string => typeof m === "string" && m.trim().length > 0)
 				: DEFAULT_CONFIG.keepTools,

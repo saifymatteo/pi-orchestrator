@@ -5,6 +5,7 @@
  * ../resolve-stub-hook.mjs (see ../register-stubs.mjs).
  */
 import { test } from "node:test";
+import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -470,7 +471,7 @@ test("AUTO session_start leaves the active set untouched (pi's defaultTools gove
 	assert.deepEqual(stub.getActiveTools(), LAUNCH_DEFAULT_ACTIVE, "precondition: pi launch defaults are reduced");
 	await withAgentDir(false, async () => {
 		(await loadExtension())(stub);
-		assert.equal(handlers.session_start?.length, 2); // config hook + lifecycle owner
+		assert.equal(handlers.session_start?.length, 3); // config + lifecycle owner + optional panel
 		await handlers.session_start[0]({}, {});
 		assert.equal(calls.length, 0, "AUTO session_start must not touch the tool set");
 		assert.deepEqual(stub.getActiveTools(), LAUNCH_DEFAULT_ACTIVE);
@@ -697,6 +698,103 @@ test("AUTO tool edits persist future engaged permissions without touching curren
 		assert.equal(await handlers.tool_call[0]({ toolName: "foo_a" }, {}), undefined);
 		assert.deepEqual(loadConfig().keepToolOverrides, { foo_a: "blocked" });
 	}, { keepTools: [] });
+});
+
+test("Atelier fleet panel: TUI startup, discovery, mode toggle and session replacement use current state", async () => {
+	await withAgentDir(true, async () => {
+		const { stub, handlers } = toolsetPi();
+		const bus = new EventEmitter();
+		const events: any[] = [];
+		const channel = "pi-atelier:sidebar-panels";
+		bus.on(channel, (event) => { events.push(event); });
+		stub.events = {
+			on(name: string, handler: (event: unknown) => void) {
+				bus.on(name, handler);
+				return () => { bus.off(name, handler); };
+			},
+			emit(name: string, event: unknown) { bus.emit(name, event); },
+		};
+		(await loadExtension())(stub);
+		assert.equal(events.length, 0, "factory does not start a publisher");
+		const widgets: any[] = [];
+		const ctx = { mode: "tui", ui: { setWidget: (_id: string, lines: unknown) => widgets.push(lines) } };
+		const emit = async (name: string) => {
+			for (const handler of handlers[name] ?? []) await handler({}, ctx);
+		};
+		const panelRows = () => {
+			const panel = events.at(-1).panel;
+			assert.equal("keyValues" in panel, false, "sidebar must use left-aligned text rows, not label/value fields");
+			return panel.rows.map((row: string | { text: string }) => typeof row === "string" ? row : row.text);
+		};
+		await emit("session_start");
+		assert.deepEqual(panelRows(), ["ENGAGED · idle", "• planner", "• reviewer", "• scout", "• worker"]);
+		assert.match(widgets.at(-1)[0], /Orchestrator: ENGAGED · Fleet:/, "detailed widget retains its layout");
+		await (handlers as any).command.orchestrator("", ctx);
+		assert.deepEqual(panelRows(), ["AUTO · idle", "• planner", "• reviewer", "• scout", "• worker"]);
+		bus.emit(channel, { version: 1, type: "discover", requestId: "atelier-late" });
+		assert.equal(events.at(-1).requestId, "atelier-late");
+		assert.deepEqual(panelRows(), ["AUTO · idle", "• planner", "• reviewer", "• scout", "• worker"]);
+		const revision = events.at(-1).revision;
+		await emit("session_shutdown");
+		assert.equal(events.at(-1).type, "unregister");
+		assert.equal(bus.listenerCount(channel), 1, "only the test consumer remains");
+		assert.ok(widgets.includes(undefined), "original widget cleanup is still invoked");
+		await emit("session_start");
+		assert.deepEqual(panelRows(), ["AUTO · idle", "• planner", "• reviewer", "• scout", "• worker"]);
+		assert.ok(events.at(-1).revision > revision);
+		await emit("session_shutdown");
+	});
+});
+
+test("manual sidebar handoff hides only the live widget, including after discovery and mode toggles", async () => {
+	await withAgentDir(false, async () => {
+		const { stub, handlers } = toolsetPi();
+		const bus = new EventEmitter();
+		const panels: any[] = [];
+		bus.on("pi-atelier:sidebar-panels", (event) => { if (event.type === "register") panels.push(event.panel); });
+		stub.events = {
+			on(name: string, handler: (event: unknown) => void) {
+				bus.on(name, handler); return () => { bus.off(name, handler); };
+			},
+			emit(name: string, event: unknown) { bus.emit(name, event); },
+		};
+		(await loadExtension())(stub);
+		const widgets: unknown[] = [];
+		const ctx = { mode: "tui", ui: { setWidget: (_id: string, lines: unknown) => widgets.push(lines) } };
+		for (const handler of handlers.session_start) await handler({}, ctx);
+		assert.ok(widgets.length > 0);
+		assert.equal(widgets.filter((lines) => lines !== undefined).length, 0, "no idle widget when explicitly disabled");
+		assert.equal(panels.at(-1).rows[0].text, "AUTO · idle");
+		assert.equal("keyValues" in panels.at(-1), false);
+		await (handlers as any).command.orchestrator("", ctx);
+		bus.emit("pi-atelier:sidebar-panels", { version: 1, type: "discover", requestId: "still-sidebar" });
+		assert.equal(panels.at(-1).rows[0].text, "ENGAGED · idle");
+		assert.equal("keyValues" in panels.at(-1), false);
+		assert.equal(widgets.filter((lines) => lines !== undefined).length, 0, "discovery and AUTO/ENGAGED must not override manual visibility");
+		for (const handler of handlers.session_shutdown) await handler({}, ctx);
+		const configFile = path.join(process.env.PI_ORCH_TEST_AGENT_DIR!, "orchestrator.jsonc");
+		const settings = JSON.parse(fs.readFileSync(configFile, "utf8"));
+		assert.equal(settings.showFleetWidget, false, "engagement saves preserve widget preference");
+		fs.writeFileSync(configFile, JSON.stringify({ ...settings, showFleetWidget: true }));
+		for (const handler of handlers.session_start) await handler({}, ctx);
+		assert.match((widgets.at(-1) as string[])[0], /Orchestrator: ENGAGED · Fleet:/, "reloading true restores the detailed fallback");
+		for (const handler of handlers.session_shutdown) await handler({}, ctx);
+	}, { showFleetWidget: false });
+});
+
+test("Atelier fleet panel: non-TUI sessions never publish or subscribe", async () => {
+	await withAgentDir(false, async () => {
+		const { stub, handlers } = toolsetPi();
+		stub.events = {
+			on(name: string) { assert.notEqual(name, "pi-atelier:sidebar-panels"); return () => {}; },
+			emit() { assert.fail("no sidebar events outside TUI"); },
+		};
+		(await loadExtension())(stub);
+		for (const mode of ["rpc", "json", "print"]) {
+			for (const handler of handlers.session_start) await handler({}, { mode });
+			for (const handler of handlers.session_shutdown) await handler({}, { mode });
+		}
+	});
 });
 
 test("ENGAGED session_start still reduces to the keep-list (unchanged)", async () => {

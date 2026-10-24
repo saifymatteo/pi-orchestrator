@@ -10,6 +10,11 @@
       "description": "Engage orchestration by default. /orchestrator toggles engagement and persists it here; false leaves normal pi tools available (AUTO mode).",
       "default": true
     },
+    "showFleetWidget": {
+      "type": "boolean",
+      "description": "Show the live transcript-area fleet widget. false hides only this widget, not the optional Atelier sidebar panel, Result/acceptance messages, or transcripts. Sidebar handoff is manual: consumer discovery never hides the widget.",
+      "default": true
+    },
     "keepTools": {
       "type": "array",
       "items": {
