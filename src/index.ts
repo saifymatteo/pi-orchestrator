@@ -26,6 +26,7 @@ import {
 	toolIsKept,
 	updateKeepToolOverrides,
 	toolMatchesAnyMatcher,
+	getConfigPath,
 	loadConfig,
 	saveConfig,
 	BUILTIN_TOOL_NAMES,
@@ -332,7 +333,8 @@ export default function (pi: any) {
 		return;
 	}
 
-	let config: OrchestratorConfig = loadConfig();
+	let configCwd = process.cwd();
+	let config: OrchestratorConfig = loadConfig(configCwd);
 	let engaged = config.enabled;
 	let lastUi: any;
 	const fleetPanel = createFleetPanel(pi.events, () => renderFleetPanel(
@@ -439,7 +441,7 @@ export default function (pi: any) {
 		config.enabled = next;
 		if (opts?.persist !== false) {
 			try {
-				saveConfig(config);
+				saveConfig(config, configCwd);
 			} catch (err) {
 				console.error("[pi-orchestrator] failed to save config:", err);
 			}
@@ -461,7 +463,8 @@ export default function (pi: any) {
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		fleetPanel.dispose();
-		config = loadConfig();
+		configCwd = ctx?.cwd ?? process.cwd();
+		config = loadConfig(configCwd);
 		parentSystemPrompt = undefined; // Defensive: don't forward a stale prompt across sessions
 		policyCache.invalidate(); // Fresh policy text for the new session's episode (ADR-0013)
 		engaged = config.enabled;
@@ -568,7 +571,7 @@ ${policyCache.get()}` };
 		handler: async (_args: string, ctx: any) => {
 			if (ctx?.ui) lastUi = ctx.ui;
 			if (ctx?.mode !== "tui") {
-				ctx?.ui?.notify("/orchestrator-tools requires TUI mode — edit ~/.pi/agent/orchestrator.jsonc instead", "warning");
+				ctx?.ui?.notify(`/orchestrator-tools requires TUI mode — edit ${getConfigPath(configCwd)} instead`, "warning");
 				return;
 			}
 
@@ -625,7 +628,7 @@ ${policyCache.get()}` };
 							keepToolOverrides: updateKeepToolOverrides(tool, newValue === "allowed", effective, config.keepToolOverrides),
 						};
 						try {
-							saveConfig(next);
+							saveConfig(next, configCwd);
 						} catch (err) {
 							settingsList.updateValue(id, toolIsKept(tool, effective, config.keepToolOverrides) ? "allowed" : "blocked");
 							ctx.ui.notify?.(`Could not save tool access: ${err}`, "error");

@@ -1,5 +1,5 @@
 /**
- * Orchestrator configuration (~/.pi/agent/orchestrator.jsonc)
+ * Orchestrator configuration (Pi extensions directories, then ~/.pi/agent).
  *
  * keepTools matcher syntax:
  *   - exact tool name            "todo"
@@ -35,27 +35,29 @@ export type { BuiltinFleetEntry, OrchestratorConfig };
 const CONFIG_FILENAME = "orchestrator.jsonc";
 const LEGACY_CONFIG_FILENAME = "orchestrator.json";
 
-export function getConfigPath(): string {
-	return path.join(getAgentDir(), CONFIG_FILENAME);
+/** Select one directory, never merge configs. Fresh installs keep the old default. */
+export function getConfigPath(cwd: string = process.cwd()): string {
+	const agentDir = getAgentDir();
+	const directories = [path.join(cwd, ".pi", "extensions"), path.join(agentDir, "extensions"), agentDir];
+	const directory = directories.find((dir) =>
+		fs.existsSync(path.join(dir, CONFIG_FILENAME)) || fs.existsSync(path.join(dir, LEGACY_CONFIG_FILENAME)),
+	) ?? agentDir;
+	return path.join(directory, CONFIG_FILENAME);
 }
 
-function getLegacyConfigPath(): string {
-	return path.join(getAgentDir(), LEGACY_CONFIG_FILENAME);
+function getLegacyConfigPath(preferred: string): string {
+	return path.join(path.dirname(preferred), LEGACY_CONFIG_FILENAME);
 }
 
-/**
- * Read the config file's raw text (ADR-0015): prefers `orchestrator.jsonc`,
- * falls back to the legacy `orchestrator.json` (plain JSON is valid JSONC —
- * nothing breaks). Returns null when neither exists.
- */
-function readConfigText(): string | null {
+/** Read JSONC or legacy JSON only within the selected directory (ADR-0015). */
+function readConfigText(preferred: string): string | null {
 	try {
-		return fs.readFileSync(getConfigPath(), "utf-8");
+		return fs.readFileSync(preferred, "utf-8");
 	} catch {
 		/* fall through to legacy */
 	}
 	try {
-		return fs.readFileSync(getLegacyConfigPath(), "utf-8");
+		return fs.readFileSync(getLegacyConfigPath(preferred), "utf-8");
 	} catch {
 		return null;
 	}
@@ -142,9 +144,9 @@ function parseBuiltinFleet(value: unknown): OrchestratorConfig["builtinFleet"] |
 	return undefined;
 }
 
-export function loadConfig(): OrchestratorConfig {
+export function loadConfig(cwd: string = process.cwd()): OrchestratorConfig {
 	try {
-		const text = readConfigText();
+		const text = readConfigText(getConfigPath(cwd));
 		if (text === null) throw new Error("no config file");
 		// JSONC parse (comments + trailing commas are valid; plain JSON too).
 		// jsonc-parser reports problems instead of throwing — treat any parse
@@ -223,16 +225,16 @@ function parseStallTimeoutMs(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-export function saveConfig(config: OrchestratorConfig): void {
-	const preferred = getConfigPath();
-	const legacy = getLegacyConfigPath();
+export function saveConfig(config: OrchestratorConfig, cwd: string = process.cwd()): void {
+	const preferred = getConfigPath(cwd);
+	const legacy = getLegacyConfigPath(preferred);
 	fs.mkdirSync(path.dirname(preferred), { recursive: true });
 
 	// Comment-preserving write (ADR-0015): per-property edits applied to the
 	// existing file's text — comments and unknown keys elsewhere in the file
 	// survive. Without an existing file (fresh install, or a file so malformed
 	// there is nothing to edit) the config is written as formatted JSON.
-	const sourceText = readConfigText();
+	const sourceText = readConfigText(preferred);
 	const current = sourceText === null ? null : jsonc.parse(sourceText, [], { allowTrailingComma: true }) as Record<string, unknown>;
 	// @ts-expect-error TS1470: import.meta not allowed in CJS output (nodenext module)
 	const { version } = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));

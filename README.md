@@ -40,7 +40,7 @@ Orchestration starts **engaged** by default:
 
 Child tool policy applies to every delegated spawn in either mode. Workers do not orchestrate further.
 
-- `/orchestrator` toggles engagement and persists it in `~/.pi/agent/orchestrator.jsonc`; startup notifies when disengaged.
+- `/orchestrator` toggles engagement and persists it in the [selected configuration file](docs/configuration.md#configuration-locations); startup notifies when disengaged.
 - `/orchestrator-tools` opens the TUI's per-tool allowed/blocked editor. It saves individual overrides, never rewrites the baseline `keepTools`, and shows discovered extension groups read-only. Choosing the baseline result removes the override. Long lists truncate to terminal width (at most 6 names plus `+N more`).
 
 See [parent tool access](docs/configuration.md#engagement-and-parent-tool-access) for matching rules, overrides, and safety caveats.
@@ -75,7 +75,7 @@ New panels start hidden. To enable this one:
 
 The panel uses the existing watcher fleet projection: idle `AUTO`/`ENGAGED` status, queued and running Runs, turns, context, tokens, and pending or failed Result delivery. Its compact sidebar layout uses left-aligned structured text rows, not label/value (`keyValues`) fields, and omits task and prompt excerpts. Idle shows `AUTO · idle` or `ENGAGED · idle` followed by a bullet roster (`• scout`, `• worker`), or `(empty fleet)` when no agents are available, without a redundant Fleet heading. The active sidebar puts the dispatch title and status counts on separate rows; the detailed widget keeps its single-line header. Atelier clips rows to the available width rather than wrapping them. It does not integrate with Atelier's native Subagents cost graph.
 
-The live transcript-area widget stays visible by default (`showFleetWidget: true`). To use only the sidebar, enable it first, then set `"showFleetWidget": false` in `~/.pi/agent/orchestrator.jsonc` and start a new session. This hides only the live widget: Result messages, acceptance messages, and transcripts are unaffected. Handoff is manual; consumer discovery never hides the widget because the sidebar protocol has no visibility acknowledgement. Restore `true` if you disable or remove the sidebar. See [Fleet displays](docs/configuration.md#fleet-displays) for the recipe.
+The live transcript-area widget stays visible by default (`showFleetWidget: true`). To use only the sidebar, enable it first, then set `"showFleetWidget": false` in your [selected configuration file](docs/configuration.md#configuration-locations) and start a new session. This hides only the live widget: Result messages, acceptance messages, and transcripts are unaffected. Handoff is manual; consumer discovery never hides the widget because the sidebar protocol has no visibility acknowledgement. Restore `true` if you disable or remove the sidebar. See [Fleet displays](docs/configuration.md#fleet-displays) for the recipe.
 
 ## Guides
 

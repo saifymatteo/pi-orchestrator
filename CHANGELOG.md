@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Configuration lookup in session-local `.pi/extensions/`, then the agent directory's `extensions/`, then the original agent directory, respecting `PI_CODING_AGENT_DIR`. The first directory with a config wins (`.jsonc` before `.json`, no merging); saves and legacy migration stay there, leaving lower-priority files untouched. With no existing config, saves retain the original agent-directory default. Reload the extension or start a new session after moving a config.
+
 ## [0.10.0] - 2026-10-24
 
 ### Added

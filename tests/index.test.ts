@@ -466,6 +466,60 @@ async function loadExtension(): Promise<any> {
 	return mod.default;
 }
 
+test("session config follows ctx.cwd and both commands save into the selected extensions directory", async () => {
+	await withAgentDir(true, async () => {
+		const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+		const globalFile = path.join(dir, "orchestrator.jsonc");
+		const globalSource = fs.readFileSync(globalFile, "utf8");
+		const projects = [path.join(dir, "project-a"), path.join(dir, "project-b")];
+		for (const cwd of projects) {
+			fs.mkdirSync(path.join(cwd, ".pi", "extensions"), { recursive: true });
+			fs.writeFileSync(path.join(cwd, ".pi", "extensions", "orchestrator.json"), '{ // project comment\n "enabled": false, "keepTools": [] }');
+		}
+		const { stub, handlers, calls } = toolsetPi(editableTools());
+		(await loadExtension())(stub);
+		await handlers.session_start[0]({}, { cwd: projects[0] });
+		assert.equal(calls.length, 0, "session cwd config overrides the initially loaded global engagement");
+		await (handlers as any).command.orchestrator("", {});
+		const projectFile = path.join(projects[0], ".pi", "extensions", "orchestrator.jsonc");
+		assert.equal(loadConfig(projects[0]).enabled, true);
+		assert.match(fs.readFileSync(projectFile, "utf8"), /project comment/);
+		assert.equal(fs.existsSync(projectFile.replace(/\.jsonc$/, ".json")), false);
+
+		const editor = await openToolEditor(handlers);
+		editor.handleInput(" ");
+		assert.deepEqual(loadConfig(projects[0]).keepToolOverrides, { foo_a: "blocked" });
+		assert.equal(fs.readFileSync(globalFile, "utf8"), globalSource, "neither command writes into the global fallback");
+
+		const notifications: string[] = [];
+		await (handlers as any).command["orchestrator-tools"]("", { mode: "rpc", ui: { notify: (message: string) => notifications.push(message) } });
+		assert.ok(notifications[0].includes(projectFile), "headless hint points at the selected config");
+		await handlers.session_start[0]({}, { cwd: projects[1] });
+		assert.equal(await handlers.before_agent_start[0]({ systemPrompt: "base" }, {}), undefined, "session replacement loads the other project's AUTO config");
+		await (handlers as any).command.orchestrator("", {});
+		assert.equal(loadConfig(projects[1]).enabled, true);
+		assert.deepEqual(loadConfig(projects[1]).keepToolOverrides, {}, "project settings do not leak across sessions");
+		assert.deepEqual(loadConfig(projects[0]).keepToolOverrides, { foo_a: "blocked" });
+	});
+});
+
+test("global extensions config is loaded at initialization and persists toggles there", async () => {
+	await withAgentDir(true, async () => {
+		const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+		const filename = path.join(dir, "extensions", "orchestrator.jsonc");
+		fs.mkdirSync(path.dirname(filename));
+		fs.writeFileSync(filename, '{ "enabled": false }');
+		const globalFile = path.join(dir, "orchestrator.jsonc");
+		const globalSource = fs.readFileSync(globalFile, "utf8");
+		const { stub, handlers } = toolsetPi();
+		(await loadExtension())(stub);
+		assert.equal(await handlers.before_agent_start[0]({ systemPrompt: "base" }, {}), undefined);
+		await (handlers as any).command.orchestrator("", {});
+		assert.equal(JSON.parse(fs.readFileSync(filename, "utf8")).enabled, true);
+		assert.equal(fs.readFileSync(globalFile, "utf8"), globalSource, "global fallback stays byte-for-byte unchanged");
+	});
+});
+
 test("AUTO session_start leaves the active set untouched (pi's defaultTools governs)", async () => {
 	const { stub, handlers, calls } = toolsetPi();
 	assert.deepEqual(stub.getActiveTools(), LAUNCH_DEFAULT_ACTIVE, "precondition: pi launch defaults are reduced");

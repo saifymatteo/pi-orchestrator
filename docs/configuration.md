@@ -2,10 +2,11 @@
 
 [Quickstart](../README.md) · [Usage](usage.md) · [Custom agents](custom-agents.md)
 
-Configuration file: `~/.pi/agent/orchestrator.jsonc`.
+Configuration file: `orchestrator.jsonc` (legacy `orchestrator.json` is also supported). See [Configuration locations](#configuration-locations) for lookup and save behavior.
 
 ## On this page
 
+- [Configuration locations](#configuration-locations)
 - [Editor assistance and field reference](#editor-assistance-and-field-reference)
 - [Shared Worker capacity](#shared-worker-capacity)
 - [Fleet displays](#fleet-displays)
@@ -23,6 +24,20 @@ Configuration file: `~/.pi/agent/orchestrator.jsonc`.
 - [Guardrails (optional)](#guardrails-optional)
 
 The config is JSONC: comments next to any key survive every save, because the extension edits only the keys it changes through `jsonc-parser`'s comment-preserving modify API. A legacy `orchestrator.json` is still read; the first save writes `orchestrator.jsonc` before removing the old file. Every setting is optional; `{}` is valid and uses the runtime defaults.
+
+## Configuration locations
+
+The first directory containing `orchestrator.jsonc` or `orchestrator.json` wins, in this order:
+
+1. `<session cwd>/.pi/extensions/`
+2. `<getAgentDir()>/extensions/` (normally `~/.pi/agent/extensions/`)
+3. `<getAgentDir()>` (normally `~/.pi/agent/`, the original location)
+
+The agent directory comes from pi's `getAgentDir()`, so a custom `PI_CODING_AGENT_DIR` applies to both user-level locations. Within the chosen directory, `.jsonc` takes precedence over `.json`. Only one config is loaded; settings are **not merged** across files or directories. A project-local `.json` therefore wins over a user-level `.jsonc`.
+
+Saves stay in the selected directory. A legacy `.json` is migrated to `.jsonc` there only after a successful write; lower-priority files are left untouched. If no config exists in any location, the default save target remains `<getAgentDir()>/orchestrator.jsonc` (normally `~/.pi/agent/orchestrator.jsonc`).
+
+Configuration is loaded at extension initialization and on `session_start`, with no live file watcher. After moving a config or adding one in a higher-priority location, reload the extension or start a new session to select it.
 
 ## Editor assistance and field reference
 
@@ -88,7 +103,7 @@ Only the sidebar uses this two-line header; the detailed widget keeps its origin
 To hand off the live display to the sidebar manually:
 
 1. Enable **Orchestrator Fleet** through `/atelier display`.
-2. Set the following in `~/.pi/agent/orchestrator.jsonc`:
+2. Set the following in your [selected configuration file](#configuration-locations):
 
    ```jsonc
    {

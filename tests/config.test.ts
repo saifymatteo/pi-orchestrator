@@ -17,6 +17,7 @@ import {
 	builtinThinkingOverrides,
 	discoverKeptTools,
 	effectiveKeepTools,
+	getConfigPath,
 	loadConfig,
 	parseThinkingLevel,
 	saveConfig,
@@ -276,7 +277,10 @@ function withConfigFiles(files: Record<string, string | null>, fn: () => unknown
 	process.env.PI_ORCH_TEST_AGENT_DIR = dir;
 	try {
 		for (const [name, body] of Object.entries(files)) {
-			if (body !== null) fs.writeFileSync(path.join(dir, name), body, "utf-8");
+			if (body !== null) {
+				fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+				fs.writeFileSync(path.join(dir, name), body, "utf-8");
+			}
 		}
 		return fn();
 	} finally {
@@ -296,6 +300,99 @@ const JSONC_WITH_COMMENTS = `{
 	],
 	"childBlockedTools": ["bash"],
 }`;
+
+const CONFIG_CANDIDATES = [
+	"project/.pi/extensions/orchestrator.jsonc",
+	"project/.pi/extensions/orchestrator.json",
+	"extensions/orchestrator.jsonc",
+	"extensions/orchestrator.json",
+	"orchestrator.jsonc",
+	"orchestrator.json",
+];
+
+test("config locations: directory precedence beats format, and JSONC wins within a directory", () => {
+	for (let i = 0; i < CONFIG_CANDIDATES.length; i++) {
+		for (let j = i + 1; j < CONFIG_CANDIDATES.length; j++) {
+			withConfigFiles({
+				[CONFIG_CANDIDATES[i]]: '{ "maxTurns": 7 }',
+				[CONFIG_CANDIDATES[j]]: '{ "maxTurns": 19, "enabled": false }',
+			}, () => {
+				const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+				const cwd = path.join(dir, "project");
+				assert.equal(getConfigPath(cwd), path.join(dir, CONFIG_CANDIDATES[i].replace(/\.json$/, ".jsonc")));
+				const config = loadConfig(cwd);
+				assert.equal(config.maxTurns, 7, `${CONFIG_CANDIDATES[i]} must beat ${CONFIG_CANDIDATES[j]}`);
+				assert.equal(config.enabled, true, "lower-priority configs must not be merged");
+			});
+		}
+	}
+});
+
+test("config locations: extension configs load and save in place, migrating JSON only beside the source", () => {
+	for (const candidate of CONFIG_CANDIDATES.slice(0, 4)) {
+		const source = '{\n // keep this comment\n "maxTurns": 12, "myOwnNote": "keep me",\n}';
+		const fallback = '{ "maxTurns": 99 }';
+		withConfigFiles({ [candidate]: source, "orchestrator.json": fallback, "orchestrator.jsonc": fallback }, () => {
+			const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+			const cwd = path.join(dir, "project");
+			assert.equal(loadConfig(cwd).maxTurns, 12);
+			saveConfig({ ...loadConfig(cwd), maxTurns: 21 }, cwd);
+			const preferred = path.join(dir, candidate.replace(/\.json$/, ".jsonc"));
+			const saved = fs.readFileSync(preferred, "utf8");
+			assert.match(saved, /keep this comment/);
+			assert.equal(jsonc.parse(saved).myOwnNote, "keep me");
+			assert.equal(jsonc.parse(saved).$schema, expectedSchemaUrl);
+			assert.equal(loadConfig(cwd).maxTurns, 21);
+			assert.equal(fs.existsSync(preferred.replace(/\.jsonc$/, ".json")), false);
+			for (const name of ["orchestrator.json", "orchestrator.jsonc"]) {
+				assert.equal(fs.readFileSync(path.join(dir, name), "utf8"), fallback, "unselected configs must be untouched");
+			}
+			saveConfig(loadConfig(cwd), cwd);
+			assert.equal(fs.readFileSync(preferred, "utf8"), saved, "subsequent saves stay in place and byte-stable");
+		});
+	}
+});
+
+test("config locations: empty extensions folders keep the original fresh-install destination", () => {
+	withConfigFiles({}, () => {
+		const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+		const cwd = path.join(dir, "project");
+		for (const folder of [path.join(cwd, ".pi", "extensions"), path.join(dir, "extensions")]) {
+			fs.mkdirSync(folder, { recursive: true });
+		}
+		assert.equal(getConfigPath(cwd), path.join(dir, "orchestrator.jsonc"));
+		saveConfig({ ...loadConfig(cwd), maxTurns: 9 }, cwd);
+		assert.equal(loadConfig(cwd).maxTurns, 9);
+		assert.deepEqual(fs.readdirSync(path.join(dir, "extensions")), []);
+		assert.deepEqual(fs.readdirSync(path.join(cwd, ".pi", "extensions")), []);
+	});
+});
+
+test("config locations: malformed selected JSONC uses defaults, not lower-priority configs", () => {
+	withConfigFiles({
+		"project/.pi/extensions/orchestrator.jsonc": "{ broken",
+		"project/.pi/extensions/orchestrator.json": '{ "maxTurns": 10 }',
+		"extensions/orchestrator.jsonc": '{ "maxTurns": 20 }',
+		"orchestrator.jsonc": '{ "maxTurns": 30 }',
+	}, () => {
+		assert.equal(loadConfig(path.join(process.env.PI_ORCH_TEST_AGENT_DIR!, "project")).maxTurns, 50);
+	});
+});
+
+test("config locations: failed extension migration preserves both source and lower-priority config", () => {
+	for (const candidate of [CONFIG_CANDIDATES[1], CONFIG_CANDIDATES[3]]) {
+		const source = '{ "maxTurns": 12 }';
+		const fallback = '{ "maxTurns": 99 }';
+		withConfigFiles({ [candidate]: source, "orchestrator.json": fallback }, () => {
+			const dir = process.env.PI_ORCH_TEST_AGENT_DIR!;
+			const cwd = path.join(dir, "project");
+			fs.mkdirSync(path.join(dir, candidate.replace(/\.json$/, ".jsonc")));
+			assert.throws(() => saveConfig(loadConfig(cwd), cwd));
+			assert.equal(fs.readFileSync(path.join(dir, candidate), "utf8"), source);
+			assert.equal(fs.readFileSync(path.join(dir, "orchestrator.json"), "utf8"), fallback);
+		});
+	}
+});
 
 test("loadConfig: orchestrator.jsonc parses with comments and trailing commas (ADR-0015)", () => {
 	withConfigFiles({ "orchestrator.jsonc": JSONC_WITH_COMMENTS }, () => {
