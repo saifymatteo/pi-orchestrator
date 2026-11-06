@@ -4,6 +4,8 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    - cron: "23 8 * * 1"
 
 jobs:
   test:
@@ -17,5 +19,6 @@ jobs:
           node-version: "24"
           cache: npm
       - run: npm ci
+      - run: npm audit --audit-level=moderate
       - run: npm run typecheck
       - run: npm test
