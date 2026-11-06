@@ -1,23 +1,23 @@
-# Dependency Overrides: brace-expansion Security Pin
+# Dependency Security Maintenance
 
-`package.json` carries `"overrides": { "brace-expansion": "^5.0.12" }`, mirrored in `package-lock.json` (`packages[""].overrides`). npm ci validates that the two match — edit them together or the CI `npm ci` step fails.
+## Current resolution
 
-## Why it exists
+The repository lockfile resolves the `@earendil-works/*` host peers to 1.5.0. The published `pi-coding-agent@1.5.0` package pins `brace-expansion@5.0.12`, `minimatch@11.0.3`, and `undici@8.12.3`, and ships no `npm-shrinkwrap.json`. These versions fix the dependency advisories found during the 2026-11-06 maintenance pass.
 
-Three GHSA DoS advisories against `brace-expansion` < 5.0.12, triggered by the copy `minimatch` pulls into the auto-installed `@earendil-works/pi-coding-agent` peer subtree. The vendor ships an `npm-shrinkwrap.json` pinning `brace-expansion@5.0.9`, and a shipped lockfile outranks root overrides, the repo lockfile, and cache state. The override is therefore inert for that subtree, but it keeps the repo lockfile — what `npm audit` and Dependabot read — on the fixed line, and it catches any future re-resolve if the vendor drops the shrinkwrap.
+`package.json` retains the `brace-expansion` override (`^5.0.12`) as a repository-side security floor. The current upstream version already satisfies it. An override in this package does not repair dependencies in an existing user's host installation; those users must update their host separately.
 
-The physical dev tree still materializes a nested `brace-expansion@5.0.9` folder; that is the vendor's pin at work, not a stale install. It is dev-only transitive tooling, this repo feeds no untrusted input through it, and the published tarball ships no dependencies.
+## When an alert opens
 
-## When @earendil-works fixes it upstream
+1. Inspect both the open Dependabot alerts and `npm audit`: the audit may report advisories that have not appeared as repository alerts yet.
+2. Trace the affected entry in `package-lock.json` to its parent. Prefer a parent release that declares fixed dependencies over forcing a possibly incompatible transitive major version through an override.
+3. Check the parent's published manifest and tarball for exact dependency pins and `npm-shrinkwrap.json`. A root override is not evidence that a vendor-controlled subtree is fixed; verify the fresh installed tree in CI as well as the lockfile.
+4. Run the CI checks: `npm ci`, `npm audit --audit-level=moderate`, `npm run typecheck`, and `npm test`. CI also runs weekly, and the publish workflow repeats the audit gate before releasing.
+5. After merging, confirm that GitHub closes the affected alerts. Do not dismiss a real vulnerability merely to clear the dashboard.
 
-Once a `pi-coding-agent` release resolves `brace-expansion` >= 5.0.12 on its own, the override is removable:
+## Release scope
 
-1. Delete the `overrides` block from `package.json`.
-2. `npm install` — syncs the recorded override out of the lockfile.
-3. `npm ci && npm audit` must report 0 vulnerabilities, then `npm run typecheck && npm test`.
+A lockfile-only host-peer update does not require an npm release: npm excludes `package-lock.json` from the published tarball, and the host peers' compatibility ranges remain unchanged. The extension has a runtime dependency on `jsonc-parser`; it does not bundle the host dependency tree. Follow `deployment.md` when a fix changes shipped runtime code or dependency requirements.
 
-To check whether a release qualifies: after installing it, read the `brace-expansion` entry in the package's shipped `npm-shrinkwrap.json` (or confirm the shrinkwrap is gone entirely).
+## Historical brace-expansion workaround
 
-## If an alert reopens
-
-A future `pi-coding-agent` update can pin a newly vulnerable version through its shrinkwrap. The repo-side remedy that closed the 2026-09-30 alerts: point the repo lockfile at a fixed version (single hoisted `node_modules/brace-expansion` entry with full registry metadata), keep manifest and lockfile in sync, push, and let Dependabot rescan. The subtree itself is only durably fixed upstream — report it to @earendil-works rather than patching `node_modules` by hand.
+The September 2026 maintenance notes described a vendor shrinkwrap pinning `brace-expansion@5.0.9`, for which a root override alone did not repair the physical nested copy. That is historical context, not the current 1.5.0 package layout. If a future vendor release introduces a shrinkwrap again, inspect the artifact rather than assuming either the old limitation or today's layout still holds.
